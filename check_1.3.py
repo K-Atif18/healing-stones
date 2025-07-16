@@ -3,7 +3,7 @@
 Preparation and verification script for Phase 1.3
 Helps ensure all data is ready before running the assembly knowledge extraction.
 """
-
+import time
 import pickle
 import json
 from pathlib import Path
