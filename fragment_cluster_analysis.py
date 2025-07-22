@@ -500,7 +500,7 @@ def main():
     parser.add_argument("--scales", nargs='+', type=float, 
                        default=[3.0, 10.0, 20.0],
                        help="Cluster extraction scales in mm")
-    parser.add_argument("--target_clusters", type=int, default=200,
+    parser.add_argument("--target_clusters", type=int, default=100,
                        help="Target clusters per scale")
     
     args = parser.parse_args()
