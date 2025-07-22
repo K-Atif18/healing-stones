@@ -728,6 +728,11 @@ class ForwardSearchMatcher:
                     
                     # Compute distance and normal similarity
                     distance = np.linalg.norm(feat1[:3] - feat2[:3])
+                    
+                    # Skip if distance is too large (optimization)
+                    if distance > 100:  # 100mm threshold
+                        continue
+                    
                     distance_tensor = torch.FloatTensor([[distance]])
                     
                     # Simple normal similarity (could be improved)
@@ -741,6 +746,10 @@ class ForwardSearchMatcher:
                         distance_tensor, normal_sim_tensor
                     )
                     
+                    # Skip low confidence matches early
+                    if match_score.item() < 0.1:
+                        continue
+                    
                     # Check shape outliers
                     shape_features = torch.cat([
                         cluster_feat_1[:, 3:5],
@@ -748,7 +757,12 @@ class ForwardSearchMatcher:
                         torch.abs(cluster_feat_1[:, 3:5] - cluster_feat_2[:, 3:5])
                     ], dim=1)
                     
-                    outlier_score = self.shape_outlier_detector(shape_features)
+                    # Add a dummy batch dimension to avoid batch norm issues
+                    if shape_features.shape[0] == 1:
+                        shape_features = torch.cat([shape_features, shape_features], dim=0)
+                        outlier_score = self.shape_outlier_detector(shape_features)[0:1]
+                    else:
+                        outlier_score = self.shape_outlier_detector(shape_features)
                     
                     # Filter outliers
                     if outlier_score.item() < 0.7:  # Not an outlier
