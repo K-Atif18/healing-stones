@@ -480,7 +480,7 @@ class ForwardSearchMatcher:
             
             for batch in progress_bar:
                 # Skip metadata in batch
-                batch_data = {k: v for k, v in batch.items() if k != 'metadata'}
+                batch_data = {k: v for k, v in batch.items() if k != 'metadata' and isinstance(v, torch.Tensor)}
                 
                 # Forward pass through siamese matcher
                 match_scores, ransac_residuals = self.siamese_matcher(
@@ -496,13 +496,13 @@ class ForwardSearchMatcher:
                 match_loss = bce_loss(match_scores, batch_data['is_match'])
                 
                 # For positive samples, also train RANSAC residual prediction
-                positive_mask = batch_data['is_match'] > 0.5
+                positive_mask = batch_data['is_match'].squeeze() > 0.5
                 if positive_mask.any():
                     # Use GT confidence as proxy for expected residual (inverse relationship)
                     expected_residual = 1.0 - batch_data['gt_confidence'][positive_mask]
                     ransac_loss = mse_loss(
-                        ransac_residuals[positive_mask],
-                        expected_residual.unsqueeze(1)
+                        ransac_residuals[positive_mask].squeeze(),
+                        expected_residual
                     )
                 else:
                     ransac_loss = torch.tensor(0.0)
@@ -535,8 +535,8 @@ class ForwardSearchMatcher:
                 
                 # Statistics
                 total_loss += loss.item()
-                predictions = (match_scores > 0.5).float()
-                correct_matches += (predictions == batch_data['is_match']).sum().item()
+                predictions = (match_scores.squeeze() > 0.5).float()
+                correct_matches += (predictions == batch_data['is_match'].squeeze()).sum().item()
                 total_samples += len(batch_data['is_match'])
                 
                 progress_bar.set_postfix({
