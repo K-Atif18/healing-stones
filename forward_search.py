@@ -557,6 +557,120 @@ class ForwardSearchMatcher:
         self.save_models("final")
         logger.info("Training complete!")
     
+    def evaluate(self, test_pairs: Optional[List[Tuple[str, str]]] = None) -> Dict:
+        """
+        Evaluate the matcher on test pairs.
+        
+        Args:
+            test_pairs: List of (fragment_1, fragment_2) tuples to evaluate.
+                       If None, uses all GT contact pairs.
+        
+        Returns:
+            Dictionary with evaluation metrics
+        """
+        self.siamese_matcher.eval()
+        self.shape_outlier_detector.eval()
+        
+        logger.info("Evaluating matcher...")
+        
+        # Get test pairs
+        if test_pairs is None:
+            # Extract all unique fragment pairs with GT matches
+            test_pairs = set()
+            for match in self.dataset.positive_samples:
+                pair = tuple(sorted([match['fragment_1'], match['fragment_2']]))
+                test_pairs.add(pair)
+            test_pairs = list(test_pairs)
+        
+        logger.info(f"Evaluating on {len(test_pairs)} fragment pairs")
+        
+        # Evaluation metrics
+        total_gt_matches = 0
+        total_predicted_matches = 0
+        true_positives = 0
+        false_positives = 0
+        false_negatives = 0
+        
+        all_confidences = []
+        all_gt_labels = []
+        
+        for frag1, frag2 in tqdm(test_pairs, desc="Evaluating pairs"):
+            # Get ground truth matches for this pair
+            gt_matches = set()
+            for match in self.dataset.positive_samples:
+                if (match['fragment_1'] == frag1 and match['fragment_2'] == frag2) or \
+                   (match['fragment_1'] == frag2 and match['fragment_2'] == frag1):
+                    if match['fragment_1'] == frag1:
+                        gt_matches.add((match['cluster_id_1'], match['cluster_id_2']))
+                    else:
+                        gt_matches.add((match['cluster_id_2'], match['cluster_id_1']))
+            
+            total_gt_matches += len(gt_matches)
+            
+            # Predict matches
+            predicted_matches = self.predict_matches((frag1, frag2), top_k=50)
+            
+            # Evaluate predictions
+            predicted_set = set()
+            for pred in predicted_matches:
+                if pred['confidence'] > 0.5:  # Threshold
+                    predicted_set.add((pred['cluster_id_1'], pred['cluster_id_2']))
+                    all_confidences.append(pred['confidence'])
+                    all_gt_labels.append(1 if (pred['cluster_id_1'], pred['cluster_id_2']) in gt_matches else 0)
+            
+            total_predicted_matches += len(predicted_set)
+            
+            # Calculate TP, FP, FN
+            tp = len(predicted_set & gt_matches)
+            fp = len(predicted_set - gt_matches)
+            fn = len(gt_matches - predicted_set)
+            
+            true_positives += tp
+            false_positives += fp
+            false_negatives += fn
+        
+        # Calculate metrics
+        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        # Calculate AUC if we have predictions
+        auc_score = 0.0
+        if all_confidences and all_gt_labels:
+            from sklearn.metrics import roc_auc_score
+            try:
+                auc_score = roc_auc_score(all_gt_labels, all_confidences)
+            except:
+                pass
+        
+        results = {
+            'num_test_pairs': len(test_pairs),
+            'total_gt_matches': total_gt_matches,
+            'total_predicted_matches': total_predicted_matches,
+            'true_positives': true_positives,
+            'false_positives': false_positives,
+            'false_negatives': false_negatives,
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1_score,
+            'auc_score': auc_score
+        }
+        
+        logger.info("\nEvaluation Results:")
+        logger.info("="*50)
+        logger.info(f"Test pairs: {results['num_test_pairs']}")
+        logger.info(f"Ground truth matches: {results['total_gt_matches']}")
+        logger.info(f"Predicted matches: {results['total_predicted_matches']}")
+        logger.info(f"True positives: {results['true_positives']}")
+        logger.info(f"False positives: {results['false_positives']}")
+        logger.info(f"False negatives: {results['false_negatives']}")
+        logger.info(f"Precision: {results['precision']:.3f}")
+        logger.info(f"Recall: {results['recall']:.3f}")
+        logger.info(f"F1 Score: {results['f1_score']:.3f}")
+        logger.info(f"AUC Score: {results['auc_score']:.3f}")
+        
+        return results
+    
     def save_models(self, suffix: str):
         """Save all models."""
         torch.save(self.siamese_matcher.state_dict(), 
@@ -695,49 +809,85 @@ def test_matcher():
             logger.info(f"   Alignment score: {match['alignment_score']:.3f}")
 
 
-
 if __name__ == "__main__":
     import argparse
-
+    
     parser = argparse.ArgumentParser(description="Forward Search-Based Matching Network")
     parser.add_argument("--train", action="store_true", help="Train the matcher")
     parser.add_argument("--test", action="store_true", help="Test the matcher")
     parser.add_argument("--predict", nargs=2, metavar=('FRAG1', 'FRAG2'),
-                        help="Predict matches for a fragment pair")
-    parser.add_argument("--embeddings", type=str, default="output_2/fragment_embeddings.h5",
-                        help="Path to fragment embeddings file")
-    parser.add_argument("--assembly", type=str, default="output/cluster_assembly_with_gt.h5",
-                        help="Path to cluster assembly ground truth file")
-    parser.add_argument("--clusters", type=str, default="output/feature_clusters_fixed.pkl",
-                        help="Path to cluster feature file")
-    parser.add_argument("--model_dir", type=str, default="models",
-                        help="Directory to save/load trained models")
-
+                       help="Predict matches for a fragment pair")
+    parser.add_argument("--embeddings", default="output_2/fragment_embeddings.h5",
+                       help="Path to fragment embeddings file")
+    parser.add_argument("--assembly", default="output/cluster_assembly_with_gt.h5",
+                       help="Path to cluster assembly file")
+    parser.add_argument("--clusters", default="output/feature_clusters_fixed.pkl",
+                       help="Path to clusters file")
+    parser.add_argument("--epochs", type=int, default=50,
+                       help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=32,
+                       help="Batch size for training")
+    parser.add_argument("--lr", type=float, default=1e-3,
+                       help="Learning rate")
+    parser.add_argument("--model_dir", default="models",
+                       help="Directory to save/load models")
+    parser.add_argument("--load", type=str,
+                       help="Load models with specified suffix")
+    parser.add_argument("--top_k", type=int, default=10,
+                       help="Number of top matches to return")
+    
     args = parser.parse_args()
-
+    
+    # Initialize matcher with custom paths
     matcher = ForwardSearchMatcher(
         fragment_embeddings_file=args.embeddings,
         cluster_assembly_file=args.assembly,
         clusters_file=args.clusters,
         model_dir=args.model_dir
     )
-
+    
+    # Load models if specified
+    if args.load:
+        matcher.load_models(args.load)
+        logger.info(f"Loaded models: {args.load}")
+    
     if args.train:
-        matcher.train(epochs=20, batch_size=32)  # you can tweak these if you want
-
-    if args.test:
-        test_matcher()
-
-    if args.predict:
+        matcher.train(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr
+        )
+    elif args.test:
+        # Run evaluation
+        results = matcher.evaluate()
+        
+        # Save evaluation results
+        eval_file = args.model_dir + "/evaluation_results.json"
+        with open(eval_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"\nSaved evaluation results to: {eval_file}")
+    elif args.predict:
+        # Predict matches for specified fragment pair
         frag1, frag2 = args.predict
-        matcher.load_models()
-        matches = matcher.predict_matches((frag1, frag2), top_k=5)
-        print(f"\nTop {len(matches)} matches for {frag1} <-> {frag2}:")
-        for i, match in enumerate(matches):
-            print(f"{i+1}. {match['cluster_id_1']} <-> {match['cluster_id_2']}")
-            print(f"   Confidence: {match['confidence']:.3f}")
-            print(f"   RANSAC residual: {match['ransac_residual']:.3f}")
-            print(f"   Distance: {match['distance']:.2f}")
-            print(f"   Validated: {match.get('validated', False)}")
-            if 'alignment_score' in match:
-                print(f"   Alignment score: {match['alignment_score']:.3f}")
+        logger.info(f"\nPredicting matches for: {frag1} <-> {frag2}")
+        
+        matches = matcher.predict_matches((frag1, frag2), top_k=args.top_k)
+        
+        if matches:
+            logger.info(f"\nFound {len(matches)} validated matches:")
+            for i, match in enumerate(matches):
+                logger.info(f"\n{i+1}. Cluster {match['cluster_id_1']} <-> {match['cluster_id_2']}")
+                logger.info(f"   Confidence: {match['confidence']:.3f}")
+                logger.info(f"   RANSAC residual: {match['ransac_residual']:.3f}")
+                logger.info(f"   Distance: {match['distance']:.2f}mm")
+                logger.info(f"   Alignment score: {match.get('alignment_score', 0):.3f}")
+        else:
+            logger.info("No validated matches found")
+        
+        # Save results
+        output_file = f"matches_{frag1}_{frag2}.json"
+        with open(output_file, 'w') as f:
+            json.dump(matches, f, indent=2)
+        logger.info(f"\nSaved matches to: {output_file}")
+    else:
+        parser.print_help()
