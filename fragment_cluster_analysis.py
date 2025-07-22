@@ -521,7 +521,7 @@ def main():
     try:
         processor.process_all_fragments()
         elapsed = time.time() - start_time
-        print(f"\n✅ Pipeline completed successfully in {elapsed:.1f} seconds!")
+        print(f"\nPipeline completed successfully in {elapsed:.1f} seconds!")
         
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
