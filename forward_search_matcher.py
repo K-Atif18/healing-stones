@@ -760,6 +760,7 @@ class ForwardSearchMatcher:
                             'confidence': match_score.item(),
                             'ransac_residual': ransac_residual.item(),
                             'distance': distance,
+                            'normal_sim': normal_sim,  # Add this field
                             'outlier_score': outlier_score.item()
                         })
         
