@@ -838,7 +838,7 @@ if __name__ == "__main__":
                        help="Path to cluster assembly file")
     parser.add_argument("--clusters", default="output/feature_clusters_fixed.pkl",
                        help="Path to clusters file")
-    parser.add_argument("--epochs", type=int, default=50,
+    parser.add_argument("--epochs", type=int, default=200,
                        help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32,
                        help="Batch size for training")
