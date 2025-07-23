@@ -392,7 +392,7 @@ class ConsistencyValidator:
                 return None
         return self.point_clouds[fragment_name]
     
-    def validate_cluster_match(self, match_data: Dict, threshold: float = 10.0) -> Tuple[bool, float]:
+    def validate_cluster_match(self, match_data: Dict, threshold: float = 35.0) -> Tuple[bool, float]:
         """
         Validate a cluster match using lightweight ICP.
         
@@ -413,8 +413,8 @@ class ConsistencyValidator:
         distance = match_data['distance']
         normal_sim = match_data['normal_sim']
         
-        # Relaxed heuristic validation
-        is_valid = distance < threshold and normal_sim > 0.3  # Changed from 0.5 to 0.3
+        # Relaxed heuristic validation to match GT distances
+        is_valid = distance < threshold and normal_sim > 0.3  # Increased from 10 to 35
         alignment_score = normal_sim * np.exp(-distance / threshold)
         
         return is_valid, alignment_score
@@ -718,6 +718,10 @@ class ForwardSearchMatcher:
         with torch.no_grad():
             for c1 in clusters_1:
                 for c2 in clusters_2:
+                    # Skip self-matches (same cluster ID across fragments)
+                    if c1 == c2:
+                        continue
+                    
                     # Get cluster features
                     feat1 = self.dataset.cluster_features.get((frag1, c1))
                     feat2 = self.dataset.cluster_features.get((frag2, c2))
