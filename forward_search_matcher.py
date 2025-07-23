@@ -224,39 +224,41 @@ class ForwardSearchMatchingDataset(Dataset):
         """Extract PCA features for each cluster."""
         features = {}
         
-        # Map clusters to fragments
-        fragment_names = sorted(set(m['fragment_1'] for m in self.all_matches) | 
-                               set(m['fragment_2'] for m in self.all_matches))
-        
-        cluster_idx = 0
-        for frag_name in fragment_names:
-            # Estimate number of clusters per fragment
-            frag_matches = [m for m in self.all_matches 
-                          if m['fragment_1'] == frag_name or m['fragment_2'] == frag_name]
+        # Build a mapping from fragment to its clusters
+        fragment_clusters = {}
+        for cluster in cluster_data['clusters']:
+            # Use global cluster_id from the cluster data
+            cluster_id = cluster['cluster_id']
             
-            if frag_matches:
-                max_cluster_id = max(
-                    max((m['cluster_id_1'] if m['fragment_1'] == frag_name else m['cluster_id_2']) 
-                        for m in frag_matches),
-                    0
-                )
-                n_clusters = max_cluster_id + 1
-                
-                for local_id in range(n_clusters):
-                    if cluster_idx < len(cluster_data['clusters']):
-                        cluster = cluster_data['clusters'][cluster_idx]
-                        
-                        # Extract features: barycenter(3) + size(1) + aniso(1) + eigenvalues(3) + scale(1)
-                        features[(frag_name, local_id)] = np.concatenate([
-                            cluster['barycenter'],
-                            [cluster['size_signature']],
-                            [cluster['anisotropy_signature']],
-                            cluster['eigenvalues'],
-                            [cluster['scale']]
-                        ])
-                        cluster_idx += 1
+            # Determine fragment - need to track which fragment each cluster belongs to
+            # This is a bit tricky - we need to use the order of processing
+            
+            # For now, let's use the cluster features directly with global IDs
+            features[cluster_id] = np.concatenate([
+                cluster['barycenter'],
+                [cluster['size_signature']],
+                [cluster['anisotropy_signature']],
+                cluster['eigenvalues'],
+                [cluster['scale']]
+            ])
         
-        return features
+        # Now we need to map these to fragment names
+        # We'll use the matches to figure out which clusters belong to which fragments
+        fragment_cluster_map = {}
+        
+        for match in self.all_matches:
+            frag1 = match['fragment_1']
+            frag2 = match['fragment_2']
+            c1 = match['cluster_id_1']
+            c2 = match['cluster_id_2']
+            
+            # Map clusters to fragments
+            if c1 in features:
+                fragment_cluster_map[(frag1, c1)] = features[c1]
+            if c2 in features:
+                fragment_cluster_map[(frag2, c2)] = features[c2]
+        
+        return fragment_cluster_map
     
     def _create_training_samples(self, negative_ratio):
         """Create balanced positive and negative training samples."""
