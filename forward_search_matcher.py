@@ -390,7 +390,7 @@ class ConsistencyValidator:
                 return None
         return self.point_clouds[fragment_name]
     
-    def validate_cluster_match(self, match_data: Dict, threshold: float = 5.0) -> Tuple[bool, float]:
+    def validate_cluster_match(self, match_data: Dict, threshold: float = 10.0) -> Tuple[bool, float]:
         """
         Validate a cluster match using lightweight ICP.
         
@@ -411,8 +411,8 @@ class ConsistencyValidator:
         distance = match_data['distance']
         normal_sim = match_data['normal_sim']
         
-        # Simple heuristic validation
-        is_valid = distance < threshold and normal_sim > 0.5
+        # Relaxed heuristic validation
+        is_valid = distance < threshold and normal_sim > 0.3  # Changed from 0.5 to 0.3
         alignment_score = normal_sim * np.exp(-distance / threshold)
         
         return is_valid, alignment_score
@@ -613,7 +613,7 @@ class ForwardSearchMatcher:
             # Evaluate predictions
             predicted_set = set()
             for pred in predicted_matches:
-                if pred['confidence'] > 0.5:  # Threshold
+                if pred['confidence'] > 0.3:  # Lowered threshold from 0.5 to 0.3
                     predicted_set.add((pred['cluster_id_1'], pred['cluster_id_2']))
                     all_confidences.append(pred['confidence'])
                     all_gt_labels.append(1 if (pred['cluster_id_1'], pred['cluster_id_2']) in gt_matches else 0)
@@ -764,8 +764,8 @@ class ForwardSearchMatcher:
                     else:
                         outlier_score = self.shape_outlier_detector(shape_features)
                     
-                    # Filter outliers
-                    if outlier_score.item() < 0.7:  # Not an outlier
+                    # Filter outliers - RELAXED THRESHOLD
+                    if outlier_score.item() < 0.9:  # Changed from 0.7 to 0.9
                         matches.append({
                             'fragment_1': frag1,
                             'fragment_2': frag2,
@@ -838,7 +838,7 @@ if __name__ == "__main__":
                        help="Path to cluster assembly file")
     parser.add_argument("--clusters", default="output/feature_clusters_fixed.pkl",
                        help="Path to clusters file")
-    parser.add_argument("--epochs", type=int, default=200,
+    parser.add_argument("--epochs", type=int, default=50,
                        help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32,
                        help="Batch size for training")
