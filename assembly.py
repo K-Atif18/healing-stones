@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Updated Assembly Knowledge Extractor with Cluster-Level Ground Truth Support
+Unified Multi-Scale Assembly Extractor
+Aligned with unified clustering pipeline and multi-scale ground truth
 """
 
 import numpy as np
@@ -19,620 +20,675 @@ import open3d as o3d
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Copy for pickle compatibility
 @dataclass
-class ClusterMatch:
-    """Represents a potential match between clusters from different fragments."""
-    cluster_id_1: int
-    cluster_id_2: int
+class SurfaceCluster:
+    """Cluster representation - copy for pickle compatibility."""
+    cluster_id: str
+    fragment_name: str
+    point_count_scale: int
+    scale_name: str
+    local_id: int
+    barycenter: np.ndarray
+    principal_axes: np.ndarray
+    eigenvalues: np.ndarray
+    size_signature: float
+    anisotropy_signature: float
+    point_count: int
+    point_indices: List[int]
+    original_point_indices: List[int]
+    neighbors: List[str] = None
+
+@dataclass
+class MultiScaleClusterMatch:
+    """Represents a potential match between clusters at a specific scale."""
+    scale: str  # "1k", "5k", "10k"
     fragment_1: str
     fragment_2: str
-    distance: float
+    cluster_id_1: str  # Full cluster ID like "frag_1_c1k_001"
+    cluster_id_2: str  # Full cluster ID like "frag_2_c1k_003"
+    local_id_1: int
+    local_id_2: int
+    
+    # Similarity metrics
     normal_similarity: float
-    is_ground_truth: bool
-    confidence: float
-    contact_point_ratio: float = 0.0
-    gt_confidence: float = 0.0  # Ground truth confidence if available
+    size_similarity: float
+    shape_similarity: float
+    spatial_proximity: float
+    
+    # Combined confidence
+    match_confidence: float
+    
+    # Ground truth information (for labeling only)
+    is_ground_truth: bool = False
+    gt_confidence: float = 0.0
+    gt_overlap_ratio_1: float = 0.0
+    gt_overlap_ratio_2: float = 0.0
+    gt_contact_type: str = ""
 
-class EnhancedAssemblyExtractor:
+class UnifiedAssemblyExtractor:
+    """Extract assembly knowledge using unified clustering pipeline."""
+    
     def __init__(self, 
-                 clusters_file: str = "output/feature_clusters_fixed.pkl",
-                 segments_file: str = "output/segmented_fragments.pkl",
-                 ground_truth_file: str = "Ground_Truth/cluster_level_ground_truth.json",
+                 clusters_file: str = "output/feature_clusters.pkl",
+                 segments_file: str = "output/segmented_fragments.pkl", 
+                 ground_truth_file: str = "Ground_Truth/multi_scale_cluster_ground_truth.json",
                  ply_dir: str = "Ground_Truth/reconstructed/artifact_1",
-                 output_dir: str = "output"):
+                 output_dir: str = "output",
+                 scales: List[str] = ["1k", "5k", "10k"]):
         
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.ply_dir = Path(ply_dir)
-        
-        # Parameters
-        self.contact_threshold = 5.0  # mm - threshold for cluster matching
-        self.break_surface_threshold = 10.0  # mm - threshold to check if cluster is on break surface
+        self.scales = scales
         
         # Load all data
-        self._load_data(clusters_file, segments_file, ground_truth_file)
+        self._load_unified_data(clusters_file, segments_file, ground_truth_file)
         
-        # Build ground truth lookup for fast access
+        # Build ground truth lookup for labeling
         self._build_gt_lookup()
         
-    def _load_data(self, clusters_file, segments_file, ground_truth_file):
-        """Load all required data including cluster-level ground truth."""
-        logger.info("Loading data...")
+    def _load_unified_data(self, clusters_file, segments_file, ground_truth_file):
+        """Load data from unified pipeline."""
+        logger.info("Loading unified pipeline data...")
         
-        # Load clusters
-        with open(clusters_file, 'rb') as f:
-            self.cluster_data = pickle.load(f)
+        # Load hierarchical clusters
+        try:
+            with open(clusters_file, 'rb') as f:
+                self.hierarchical_clusters = pickle.load(f)
+            logger.info("Loaded hierarchical cluster data")
+        except (AttributeError, ImportError) as e:
+            logger.warning(f"Failed to load hierarchical clusters: {e}")
+            # Try flat format
+            flat_file = Path(clusters_file).parent / "feature_clusters_flat.pkl"
+            if flat_file.exists():
+                self._load_flat_clusters(flat_file)
+            else:
+                raise FileNotFoundError("No compatible cluster file found!")
         
+        # Load segmentation data
         with open(segments_file, 'rb') as f:
             self.segment_data = pickle.load(f)
         
-        # Load ground truth - try cluster-level first, fall back to original
+        # Load multi-scale ground truth
         if Path(ground_truth_file).exists():
             with open(ground_truth_file, 'r') as f:
                 self.ground_truth = json.load(f)
-            logger.info("Loaded cluster-level ground truth")
+            logger.info("Loaded multi-scale ground truth")
         else:
-            # Fall back to original ground truth
-            fallback_file = "Ground_Truth/ground_truth_from_positioned.json"
-            with open(fallback_file, 'r') as f:
-                self.ground_truth = json.load(f)
-            logger.warning(f"Cluster-level GT not found, using fragment-level GT")
+            logger.error(f"Ground truth file not found: {ground_truth_file}")
+            self.ground_truth = {'cluster_ground_truth_matches_by_scale': {}}
         
-        # Check if using pre-positioned fragments
-        self.using_positioned = self.ground_truth.get('extraction_info', {}).get('fragments_are_pre_positioned', False)
-        if self.using_positioned:
-            logger.info("Using pre-positioned fragments - no transformation needed")
+        logger.info(f"Loaded data for {len(self.hierarchical_clusters)} fragments")
+        for frag_name, scales in self.hierarchical_clusters.items():
+            for scale_name, clusters in scales.items():
+                logger.info(f"  {frag_name} - {scale_name}: {len(clusters)} clusters")
+    
+    def _load_flat_clusters(self, flat_file: Path):
+        """Convert flat cluster data to hierarchical."""
+        with open(flat_file, 'rb') as f:
+            flat_data = pickle.load(f)
         
-        # Organize clusters by fragment
-        self._organize_clusters_improved()
+        clusters = flat_data.get('clusters', flat_data) if isinstance(flat_data, dict) else flat_data
         
-        # Load fragment point clouds and identify break surface clusters
-        self._identify_break_surface_clusters()
+        self.hierarchical_clusters = {}
+        for cluster_data in clusters:
+            if hasattr(cluster_data, 'fragment_name'):
+                fragment = cluster_data.fragment_name
+                scale = cluster_data.scale_name
+                cluster_dict = {
+                    'cluster_id': cluster_data.cluster_id,
+                    'barycenter': cluster_data.barycenter,
+                    'principal_axes': cluster_data.principal_axes,
+                    'eigenvalues': cluster_data.eigenvalues,
+                    'size_signature': cluster_data.size_signature,
+                    'anisotropy_signature': cluster_data.anisotropy_signature,
+                    'point_count': cluster_data.point_count,
+                    'local_id': cluster_data.local_id
+                }
+            else:
+                fragment = cluster_data.get('fragment', 'unknown')
+                scale = cluster_data.get('scale', '1k')
+                cluster_dict = cluster_data
+            
+            if fragment not in self.hierarchical_clusters:
+                self.hierarchical_clusters[fragment] = {}
+            if scale not in self.hierarchical_clusters[fragment]:
+                self.hierarchical_clusters[fragment][scale] = []
+            
+            self.hierarchical_clusters[fragment][scale].append(cluster_dict)
+        
+        logger.info("Converted flat clusters to hierarchical structure")
     
     def _build_gt_lookup(self):
-        """Build lookup table for ground truth cluster matches."""
-        self.gt_matches_lookup = {}
-        self.gt_matches_by_pair = {}
+        """Build lookup table for ground truth labeling only."""
+        logger.info("Building ground truth lookup for labeling...")
         
-        # Check if we have cluster-level ground truth
-        if 'cluster_ground_truth_matches' in self.ground_truth:
-            logger.info("Building cluster-level ground truth lookup...")
+        self.gt_matches_by_scale = {}
+        
+        # Get GT matches by scale
+        gt_matches_by_scale = self.ground_truth.get('cluster_ground_truth_matches_by_scale', {})
+        
+        for scale in self.scales:
+            self.gt_matches_by_scale[scale] = {}
             
-            for match in self.ground_truth['cluster_ground_truth_matches']:
+            scale_matches = gt_matches_by_scale.get(scale, [])
+            for match in scale_matches:
+                # Create lookup key
                 frag1 = match['fragment_1']
                 frag2 = match['fragment_2']
-                cluster1 = match['cluster_id_1']
-                cluster2 = match['cluster_id_2']
+                local_id1 = match['local_id_1']
+                local_id2 = match['local_id_2']
                 
-                # Create bidirectional lookup
-                key1 = (frag1, cluster1, frag2, cluster2)
-                key2 = (frag2, cluster2, frag1, cluster1)
+                # Bidirectional lookup
+                key1 = (frag1, local_id1, frag2, local_id2)
+                key2 = (frag2, local_id2, frag1, local_id1)
                 
-                self.gt_matches_lookup[key1] = match
-                self.gt_matches_lookup[key2] = match
+                self.gt_matches_by_scale[scale][key1] = match
+                self.gt_matches_by_scale[scale][key2] = match
+            
+            logger.info(f"Scale {scale}: {len(scale_matches)} GT matches loaded")
+    
+    def extract_multi_scale_assembly_knowledge(self):
+        """Extract assembly knowledge across all scales."""
+        logger.info("Extracting multi-scale assembly knowledge...")
+        
+        all_matches_by_scale = {}
+        
+        # Process each scale separately
+        for scale in self.scales:
+            logger.info(f"\nProcessing scale: {scale}")
+            scale_matches = self._extract_scale_matches(scale)
+            all_matches_by_scale[scale] = scale_matches
+            
+            logger.info(f"Scale {scale}: {len(scale_matches)} total matches")
+            gt_matches = [m for m in scale_matches if m.is_ground_truth]
+            logger.info(f"Scale {scale}: {len(gt_matches)} GT labeled matches")
+        
+        # Build multi-scale assembly graph
+        assembly_graph = self._build_multi_scale_graph(all_matches_by_scale)
+        
+        # Extract multi-scale topology features
+        topology_features = self._extract_topology_features(all_matches_by_scale)
+        
+        # Save all results
+        self._save_multi_scale_results(all_matches_by_scale, assembly_graph, topology_features)
+        
+        # Generate comprehensive report
+        self._generate_comprehensive_report(all_matches_by_scale)
+        
+        return all_matches_by_scale, assembly_graph
+    
+    def _extract_scale_matches(self, scale: str) -> List[MultiScaleClusterMatch]:
+        """Extract matches for a specific scale across all fragment pairs."""
+        scale_matches = []
+        
+        # Get all fragments that have clusters at this scale
+        fragments_with_scale = [
+            frag for frag, scales_dict in self.hierarchical_clusters.items()
+            if scale in scales_dict and len(scales_dict[scale]) > 0
+        ]
+        
+        logger.info(f"Scale {scale}: {len(fragments_with_scale)} fragments with clusters")
+        
+        # Compare all fragment pairs
+        for i in range(len(fragments_with_scale)):
+            for j in range(i + 1, len(fragments_with_scale)):
+                frag1 = fragments_with_scale[i]
+                frag2 = fragments_with_scale[j]
                 
-                # Store by fragment pair
-                pair = tuple(sorted([frag1, frag2]))
-                if pair not in self.gt_matches_by_pair:
-                    self.gt_matches_by_pair[pair] = []
-                self.gt_matches_by_pair[pair].append(match)
-            
-            logger.info(f"Loaded {len(self.ground_truth['cluster_ground_truth_matches'])} cluster GT matches")
-        else:
-            logger.warning("No cluster-level ground truth found in file")
-    
-    def _organize_clusters_improved(self):
-        """Organize clusters by fragment using segment data counts."""
-        self.clusters_by_fragment = {}
-        self.cluster_lookup = {}
-        
-        fragment_names = sorted(self.segment_data.keys())
-        cluster_idx = 0
-        
-        for frag_name in fragment_names:
-            n_clusters = self.segment_data[frag_name].get('n_clusters', 0)
-            fragment_clusters = []
-            
-            for i in range(n_clusters):
-                if cluster_idx < len(self.cluster_data['clusters']):
-                    cluster = self.cluster_data['clusters'][cluster_idx].copy()
-                    cluster['fragment'] = frag_name
-                    cluster['global_id'] = cluster_idx
-                    cluster['local_id'] = i  # Add local ID within fragment
-                    
-                    self.cluster_lookup[cluster['cluster_id']] = cluster
-                    fragment_clusters.append(cluster)
-                    cluster_idx += 1
-            
-            self.clusters_by_fragment[frag_name] = fragment_clusters
-            logger.info(f"{frag_name}: assigned {len(fragment_clusters)} clusters")
-    
-    def _identify_break_surface_clusters(self):
-        """Use all available clusters for each fragment."""
-        logger.info("Preparing clusters for matching...")
-        
-        self.break_surface_clusters = {}
-        self.break_surface_points = {}
-        
-        for frag_name in self.segment_data.keys():
-            ply_file = self.ply_dir / f"{frag_name}.ply"
-            
-            if not ply_file.exists():
-                logger.warning(f"PLY file not found: {ply_file}")
-                continue
-            
-            # Load point cloud
-            pcd = o3d.io.read_point_cloud(str(ply_file))
-            points = np.asarray(pcd.points)
-            colors = np.asarray(pcd.colors)
-            
-            # Get break surface points (green) for reference
-            green_mask = (colors[:, 1] > 0.6) & (colors[:, 0] < 0.4) & (colors[:, 2] < 0.4)
-            break_points = points[green_mask]
-            self.break_surface_points[frag_name] = break_points
-            
-            # Prepare all clusters
-            all_clusters = []
-            for cluster in self.clusters_by_fragment.get(frag_name, []):
-                # Transform cluster position if needed
-                if self.using_positioned:
-                    cluster_pos = cluster['barycenter']
-                else:
-                    # Apply transform if available
-                    transform = np.array(self.ground_truth['fragments'][frag_name]['transform_matrix'])
-                    bary_homo = np.append(cluster['barycenter'], 1.0)
-                    cluster_pos = (transform @ bary_homo)[:3]
+                pair_matches = self._compare_fragment_pair_at_scale(frag1, frag2, scale)
+                scale_matches.extend(pair_matches)
                 
-                cluster['world_position'] = cluster_pos
-                cluster['is_break_surface'] = True  # Consider all clusters
-                all_clusters.append(cluster)
-            
-            self.break_surface_clusters[frag_name] = all_clusters
-            logger.info(f"{frag_name}: prepared {len(all_clusters)} clusters")
+                if pair_matches:
+                    gt_count = sum(1 for m in pair_matches if m.is_ground_truth)
+                    logger.info(f"  {frag1} ↔ {frag2}: {len(pair_matches)} matches ({gt_count} GT)")
+        
+        return scale_matches
     
-    def extract_assembly_knowledge(self):
-        """Extract assembly knowledge with cluster-level ground truth."""
-        logger.info("Extracting assembly knowledge with cluster GT...")
+    def _compare_fragment_pair_at_scale(self, frag1: str, frag2: str, scale: str) -> List[MultiScaleClusterMatch]:
+        """Compare all clusters between two fragments at a specific scale."""
         
-        # Find cluster matches for each contact pair
-        all_matches = []
-        
-        # Get contact pairs from ground truth or detect them
-        if 'contact_pairs' in self.ground_truth:
-            contact_pairs = self.ground_truth['contact_pairs']
-        else:
-            # Detect from cluster GT matches
-            contact_pairs = list(self.gt_matches_by_pair.keys())
-        
-        for pair in contact_pairs:
-            if isinstance(pair, list):
-                frag1, frag2 = pair[0], pair[1]
-            else:
-                frag1, frag2 = pair[0], pair[1]
-            
-            if frag1 not in self.break_surface_clusters or frag2 not in self.break_surface_clusters:
-                continue
-            
-            logger.info(f"Processing contact pair: {frag1} <-> {frag2}")
-            
-            # Get ground truth matches for this pair if available
-            pair_key = tuple(sorted([frag1, frag2]))
-            gt_matches_for_pair = self.gt_matches_by_pair.get(pair_key, [])
-            
-            # Find matches between clusters
-            pair_matches = self._find_cluster_matches_for_pair(
-                frag1, frag2, gt_matches_for_pair
-            )
-            
-            all_matches.extend(pair_matches)
-        
-        # Build assembly graph
-        assembly_graph = self._build_assembly_graph(all_matches)
-        
-        # Mine topology features
-        topology_features = self._mine_topology_features()
-        
-        # Save results
-        self._save_assembly_knowledge(all_matches, assembly_graph, topology_features)
-        
-        # Log statistics
-        total_matches = len(all_matches)
-        gt_matches = sum(1 for m in all_matches if m.is_ground_truth)
-        logger.info(f"\nTotal matches found: {total_matches}")
-        logger.info(f"Ground truth matches identified: {gt_matches}")
-        if total_matches > 0:
-            logger.info(f"GT percentage: {gt_matches/total_matches*100:.1f}%")
-        
-        return all_matches, assembly_graph
-    
-    def _find_cluster_matches_for_pair(self, frag1: str, frag2: str, gt_matches_for_pair: List):
-        """Find all potential matches between clusters of two fragments."""
-        clusters1 = self.break_surface_clusters[frag1]
-        clusters2 = self.break_surface_clusters[frag2]
+        clusters1 = self.hierarchical_clusters[frag1].get(scale, [])
+        clusters2 = self.hierarchical_clusters[frag2].get(scale, [])
         
         if not clusters1 or not clusters2:
             return []
         
-        matches = []
+        pair_matches = []
         
-        # Build KD-tree for efficient search
-        positions2 = np.array([c['world_position'] for c in clusters2])
-        tree2 = cKDTree(positions2)
-        
-        # For each cluster in frag1, find potential matches in frag2
-        for cluster1 in clusters1:
-            pos1 = cluster1['world_position']
-            
-            # Find nearby clusters
-            search_radius = max(cluster1['scale'] * 2, self.contact_threshold * 2)
-            indices = tree2.query_ball_point(pos1, search_radius)
-            
-            for idx in indices:
-                cluster2 = clusters2[idx]
+        # Compare EVERY cluster from frag1 with EVERY cluster from frag2
+        for i, cluster1 in enumerate(clusters1):
+            for j, cluster2 in enumerate(clusters2):
                 
-                # Check if this is a ground truth match
-                is_gt, gt_info = self._check_cluster_gt_match(
-                    cluster1, cluster2, frag1, frag2, gt_matches_for_pair
+                # Calculate similarity metrics (NO distance threshold)
+                match = self._evaluate_cluster_similarity(
+                    cluster1, cluster2, frag1, frag2, scale, i, j
                 )
                 
-                # Calculate match metrics
-                match = self._evaluate_cluster_match(
-                    cluster1, cluster2, frag1, frag2, is_gt, gt_info
-                )
+                # Label with ground truth if available
+                self._label_with_ground_truth(match, scale)
                 
-                if match.confidence > 0.1:  # Keep all reasonable matches
-                    matches.append(match)
+                # Store ALL matches (no filtering by distance/confidence)
+                pair_matches.append(match)
         
-        # Sort by confidence
-        matches.sort(key=lambda m: m.confidence, reverse=True)
+        # Also check for GT matches that weren't found
+        missing_gt_matches = self._find_missing_gt_matches(frag1, frag2, scale, pair_matches)
+        pair_matches.extend(missing_gt_matches)
         
-        # Log statistics
-        if matches:
-            logger.info(f"  Found {len(matches)} matches, top confidence: {matches[0].confidence:.3f}")
-            gt_count = sum(1 for m in matches if m.is_ground_truth)
-            logger.info(f"  Ground truth matches: {gt_count}")
-            
-            # Log some GT matches for debugging
-            gt_matches = [m for m in matches if m.is_ground_truth]
-            for i, m in enumerate(gt_matches[:3]):
-                logger.info(f"    GT match {i+1}: C{m.cluster_id_1} <-> C{m.cluster_id_2}, "
-                           f"conf: {m.confidence:.3f}, gt_conf: {m.gt_confidence:.3f}")
-        
-        return matches
+        return pair_matches
     
-    def _check_cluster_gt_match(self, cluster1, cluster2, frag1, frag2, gt_matches_for_pair):
-        """Check if two clusters form a ground truth match."""
-        # Use local cluster IDs for matching
-        cluster_id_1 = cluster1.get('local_id', cluster1['cluster_id'])
-        cluster_id_2 = cluster2.get('local_id', cluster2['cluster_id'])
+    def _evaluate_cluster_similarity(self, cluster1: Dict, cluster2: Dict, 
+                                   frag1: str, frag2: str, scale: str, 
+                                   local_id1: int, local_id2: int) -> MultiScaleClusterMatch:
+        """Calculate similarity between two clusters WITHOUT distance threshold."""
         
-        # Check in GT lookup
-        key = (frag1, cluster_id_1, frag2, cluster_id_2)
-        if key in self.gt_matches_lookup:
-            gt_match = self.gt_matches_lookup[key]
-            return True, gt_match
+        # Extract cluster properties
+        barycenter1 = np.array(cluster1.get('barycenter', [0, 0, 0]))
+        barycenter2 = np.array(cluster2.get('barycenter', [0, 0, 0]))
         
-        # Also check reverse key
-        key_rev = (frag2, cluster_id_2, frag1, cluster_id_1)
-        if key_rev in self.gt_matches_lookup:
-            gt_match = self.gt_matches_lookup[key_rev]
-            return True, gt_match
+        axes1 = np.array(cluster1.get('principal_axes', np.eye(3)))
+        axes2 = np.array(cluster2.get('principal_axes', np.eye(3)))
         
-        # Check in the pair-specific list
-        for gt_match in gt_matches_for_pair:
-            if ((gt_match['fragment_1'] == frag1 and gt_match['cluster_id_1'] == cluster_id_1 and
-                 gt_match['fragment_2'] == frag2 and gt_match['cluster_id_2'] == cluster_id_2) or
-                (gt_match['fragment_1'] == frag2 and gt_match['cluster_id_1'] == cluster_id_2 and
-                 gt_match['fragment_2'] == frag1 and gt_match['cluster_id_2'] == cluster_id_1)):
-                return True, gt_match
+        eigenvals1 = np.array(cluster1.get('eigenvalues', [1, 1, 1]))
+        eigenvals2 = np.array(cluster2.get('eigenvalues', [1, 1, 1]))
         
-        return False, None
-    
-    def _evaluate_cluster_match(self, cluster1, cluster2, frag1, frag2, is_gt, gt_info):
-        """Evaluate if two clusters form a good match."""
-        pos1 = cluster1['world_position']
-        pos2 = cluster2['world_position']
+        size_sig1 = cluster1.get('size_signature', 1.0)
+        size_sig2 = cluster2.get('size_signature', 1.0)
         
-        # Distance between clusters
-        distance = np.linalg.norm(pos1 - pos2)
+        aniso_sig1 = cluster1.get('anisotropy_signature', 1.0)
+        aniso_sig2 = cluster2.get('anisotropy_signature', 1.0)
         
-        # Normal similarity
-        normal_similarity = self._compute_normal_similarity(cluster1, cluster2, frag1, frag2)
-        
-        # Calculate confidence
-        dist_score = np.exp(-distance / self.contact_threshold)
-        
-        # Base confidence
-        confidence = 0.5 * dist_score + 0.5 * normal_similarity
-        
-        # Get GT confidence if available
-        gt_confidence = 0.0
-        if is_gt and gt_info:
-            gt_confidence = gt_info.get('confidence', 0.8)
-            # Boost confidence for GT matches
-            confidence = max(confidence, 0.7)
-        
-        # Use local IDs for the match
-        cluster_id_1 = cluster1.get('local_id', cluster1['cluster_id'])
-        cluster_id_2 = cluster2.get('local_id', cluster2['cluster_id'])
-        
-        return ClusterMatch(
-            cluster_id_1=cluster_id_1,
-            cluster_id_2=cluster_id_2,
-            fragment_1=frag1,
-            fragment_2=frag2,
-            distance=distance,
-            normal_similarity=normal_similarity,
-            is_ground_truth=is_gt,
-            confidence=float(confidence),
-            contact_point_ratio=0.0,  # Not computed here
-            gt_confidence=float(gt_confidence)
-        )
-    
-    def _compute_normal_similarity(self, cluster1, cluster2, frag1, frag2):
-        """Compute normal similarity between clusters."""
-        if 'principal_axes' not in cluster1 or 'principal_axes' not in cluster2:
-            return 0.5
-        
-        # Transform axes if needed
-        if self.using_positioned:
-            axes1 = cluster1['principal_axes']
-            axes2 = cluster2['principal_axes']
-        else:
-            # Apply rotation part of transform
-            transform1 = np.array(self.ground_truth['fragments'][frag1]['transform_matrix'])
-            transform2 = np.array(self.ground_truth['fragments'][frag2]['transform_matrix'])
-            axes1 = transform1[:3, :3] @ cluster1['principal_axes']
-            axes2 = transform2[:3, :3] @ cluster2['principal_axes']
-        
-        normal1 = axes1[:, 0]
+        # 1. Normal Similarity (most important for assembly)
+        normal1 = axes1[:, 0]  # First principal axis
         normal2 = axes2[:, 0]
         
-        # Matching surfaces should have opposing normals
-        normal_dot = np.dot(normal1, -normal2)
-        normal_similarity = (normal_dot + 1) / 2  # Normalize to [0, 1]
+        # For assembly, surfaces should have opposing normals
+        normal_dot = np.abs(np.dot(normal1, -normal2))
+        normal_similarity = normal_dot  # 0 to 1, higher is better
         
-        return normal_similarity
+        # 2. Size Similarity
+        size_ratio = min(size_sig1, size_sig2) / max(size_sig1, size_sig2)
+        size_similarity = size_ratio  # 0 to 1, higher is better
+        
+        # 3. Shape Similarity (anisotropy)
+        aniso_ratio = min(aniso_sig1, aniso_sig2) / max(aniso_sig1, aniso_sig2)
+        shape_similarity = aniso_ratio  # 0 to 1, higher is better
+        
+        # 4. Spatial Proximity (for reference, but no threshold)
+        distance = np.linalg.norm(barycenter1 - barycenter2)
+        # Convert distance to a similarity score (closer = higher similarity)
+        max_reasonable_distance = 100.0  # 100mm - adjust based on your data
+        spatial_proximity = np.exp(-distance / max_reasonable_distance)  # 0 to 1
+        
+        # 5. Combined Confidence (weighted combination)
+        # Emphasize normal similarity for assembly
+        weights = {
+            'normal': 0.4,      # Most important for assembly
+            'size': 0.25,        # Somewhat important
+            'shape': 0.3,       # Somewhat important  
+            'spatial': 0.5     # Least important (no threshold)
+        }
+        
+        match_confidence = (
+            weights['normal'] * normal_similarity +
+            weights['size'] * size_similarity +
+            weights['shape'] * shape_similarity +
+            weights['spatial'] * spatial_proximity
+        )
+        
+        # Generate cluster IDs
+        cluster_id1 = cluster1.get('cluster_id', f"{frag1}_c{scale}_{local_id1+1:03d}")
+        cluster_id2 = cluster2.get('cluster_id', f"{frag2}_c{scale}_{local_id2+1:03d}")
+        
+        return MultiScaleClusterMatch(
+            scale=scale,
+            fragment_1=frag1,
+            fragment_2=frag2,
+            cluster_id_1=cluster_id1,
+            cluster_id_2=cluster_id2,
+            local_id_1=local_id1,
+            local_id_2=local_id2,
+            normal_similarity=float(normal_similarity),
+            size_similarity=float(size_similarity),
+            shape_similarity=float(shape_similarity),
+            spatial_proximity=float(spatial_proximity),
+            match_confidence=float(match_confidence)
+        )
     
-    def _build_assembly_graph(self, cluster_matches):
-        """Build assembly graph with intra and inter-fragment edges."""
+    def _label_with_ground_truth(self, match: MultiScaleClusterMatch, scale: str):
+        """Label match with ground truth information (if available)."""
+        
+        # Check if this match exists in ground truth
+        key = (match.fragment_1, match.local_id_1, match.fragment_2, match.local_id_2)
+        
+        gt_lookup = self.gt_matches_by_scale.get(scale, {})
+        
+        if key in gt_lookup:
+            gt_match = gt_lookup[key]
+            
+            # Label as ground truth
+            match.is_ground_truth = True
+            match.gt_confidence = gt_match.get('confidence', 0.0)
+            match.gt_overlap_ratio_1 = gt_match.get('overlap_ratio_1', 0.0)
+            match.gt_overlap_ratio_2 = gt_match.get('overlap_ratio_2', 0.0)
+            match.gt_contact_type = gt_match.get('contact_type', 'unknown')
+            
+            # Optionally boost confidence for GT matches (but not required)
+            # match.match_confidence = max(match.match_confidence, 0.7)
+    
+    def _find_missing_gt_matches(self, frag1: str, frag2: str, scale: str, 
+                               existing_matches: List[MultiScaleClusterMatch]) -> List[MultiScaleClusterMatch]:
+        """Find GT matches that weren't found in similarity comparison."""
+        
+        missing_matches = []
+        gt_lookup = self.gt_matches_by_scale.get(scale, {})
+        
+        # Get existing match keys
+        existing_keys = set()
+        for match in existing_matches:
+            key = (match.fragment_1, match.local_id_1, match.fragment_2, match.local_id_2)
+            existing_keys.add(key)
+        
+        # Check all GT matches for this pair
+        for key, gt_match in gt_lookup.items():
+            gt_frag1, gt_local1, gt_frag2, gt_local2 = key
+            
+            # Check if this GT match involves our fragment pair
+            if ((gt_frag1 == frag1 and gt_frag2 == frag2) or 
+                (gt_frag1 == frag2 and gt_frag2 == frag1)):
+                
+                if key not in existing_keys:
+                    # Create a match for this missing GT
+                    logger.warning(f"Found GT match not in similarity results: {key}")
+                    
+                    # Create minimal match with GT labeling
+                    missing_match = MultiScaleClusterMatch(
+                        scale=scale,
+                        fragment_1=gt_frag1,
+                        fragment_2=gt_frag2,
+                        cluster_id_1=gt_match.get('cluster_id_1', ''),
+                        cluster_id_2=gt_match.get('cluster_id_2', ''),
+                        local_id_1=gt_local1,
+                        local_id_2=gt_local2,
+                        normal_similarity=0.0,  # Unknown
+                        size_similarity=0.0,    # Unknown
+                        shape_similarity=0.0,   # Unknown
+                        spatial_proximity=0.0,  # Unknown
+                        match_confidence=0.0,   # Low since not found by similarity
+                        is_ground_truth=True,
+                        gt_confidence=gt_match.get('confidence', 0.0),
+                        gt_overlap_ratio_1=gt_match.get('overlap_ratio_1', 0.0),
+                        gt_overlap_ratio_2=gt_match.get('overlap_ratio_2', 0.0),
+                        gt_contact_type=gt_match.get('contact_type', 'unknown')
+                    )
+                    
+                    missing_matches.append(missing_match)
+        
+        if missing_matches:
+            logger.info(f"Added {len(missing_matches)} missing GT matches for {frag1} ↔ {frag2}")
+        
+        return missing_matches
+    
+    def _build_multi_scale_graph(self, all_matches_by_scale: Dict) -> nx.Graph:
+        """Build assembly graph with multi-scale edges."""
+        
         G = nx.Graph()
         
-        # Add nodes for all clusters
-        for fragment_name, clusters in self.clusters_by_fragment.items():
-            for cluster in clusters:
-                node_id = f"{fragment_name}_{cluster['cluster_id']}"
-                G.add_node(node_id, 
-                          cluster_id=cluster['cluster_id'],
-                          fragment=fragment_name,
-                          scale=cluster['scale'],
-                          is_break_surface=cluster.get('is_break_surface', False))
+        # Add nodes for all clusters at all scales
+        for frag_name, scales_dict in self.hierarchical_clusters.items():
+            for scale_name, clusters in scales_dict.items():
+                for i, cluster in enumerate(clusters):
+                    cluster_id = cluster.get('cluster_id', f"{frag_name}_c{scale_name}_{i+1:03d}")
+                    
+                    node_id = f"{frag_name}_{scale_name}_{i}"
+                    G.add_node(node_id,
+                              fragment=frag_name,
+                              scale=scale_name,
+                              local_id=i,
+                              cluster_id=cluster_id,
+                              size_signature=cluster.get('size_signature', 0),
+                              anisotropy_signature=cluster.get('anisotropy_signature', 0))
         
-        # Add intra-fragment edges from overlap graph
-        for edge in self.cluster_data.get('overlap_graph_edges', []):
-            cluster1 = self.cluster_lookup.get(edge[0])
-            cluster2 = self.cluster_lookup.get(edge[1])
-            
-            if cluster1 and cluster2 and cluster1.get('fragment') == cluster2.get('fragment'):
-                node1 = f"{cluster1['fragment']}_{edge[0]}"
-                node2 = f"{cluster2['fragment']}_{edge[1]}"
-                if G.has_node(node1) and G.has_node(node2):
-                    G.add_edge(node1, node2, type='intra_fragment', weight=1.0)
-        
-        # Add inter-fragment edges from matches
-        for match in cluster_matches:
-            # Use global cluster IDs for graph nodes
-            cluster1_global = None
-            cluster2_global = None
-            
-            # Find global IDs from local IDs
-            for c in self.clusters_by_fragment.get(match.fragment_1, []):
-                if c.get('local_id', c['cluster_id']) == match.cluster_id_1:
-                    cluster1_global = c['cluster_id']
-                    break
-            
-            for c in self.clusters_by_fragment.get(match.fragment_2, []):
-                if c.get('local_id', c['cluster_id']) == match.cluster_id_2:
-                    cluster2_global = c['cluster_id']
-                    break
-            
-            if cluster1_global is not None and cluster2_global is not None:
-                node1 = f"{match.fragment_1}_{cluster1_global}"
-                node2 = f"{match.fragment_2}_{cluster2_global}"
+        # Add edges from matches
+        edge_count = 0
+        for scale, matches in all_matches_by_scale.items():
+            for match in matches:
+                node1 = f"{match.fragment_1}_{scale}_{match.local_id_1}"
+                node2 = f"{match.fragment_2}_{scale}_{match.local_id_2}"
                 
                 if G.has_node(node1) and G.has_node(node2):
                     G.add_edge(node1, node2,
-                              type='inter_fragment',
-                              distance=match.distance,
+                              scale=scale,
+                              match_confidence=match.match_confidence,
+                              normal_similarity=match.normal_similarity,
                               is_ground_truth=match.is_ground_truth,
-                              confidence=match.confidence,
                               gt_confidence=match.gt_confidence,
-                              weight=match.confidence)
+                              weight=match.match_confidence)
+                    edge_count += 1
         
+        logger.info(f"Built graph with {G.number_of_nodes()} nodes and {edge_count} edges")
         return G
     
-    def _mine_topology_features(self):
-        """Extract topology features from cluster relationships."""
-        features = {'multi_scale_hierarchy': {}}
+    def _extract_topology_features(self, all_matches_by_scale: Dict) -> Dict:
+        """Extract topology features from multi-scale matches."""
         
-        for fragment_name, clusters in self.clusters_by_fragment.items():
-            # Group by scale
-            by_scale = {}
-            for cluster in clusters:
-                scale = cluster['scale']
-                if scale not in by_scale:
-                    by_scale[scale] = []
-                by_scale[scale].append(cluster)
+        features = {
+            'scale_statistics': {},
+            'cross_scale_relationships': {},
+            'fragment_connectivity': {}
+        }
+        
+        # Scale-wise statistics
+        for scale, matches in all_matches_by_scale.items():
+            gt_matches = [m for m in matches if m.is_ground_truth]
             
-            # Find parent-child relationships
-            hierarchy = []
-            scales = sorted(by_scale.keys())
+            features['scale_statistics'][scale] = {
+                'total_matches': len(matches),
+                'gt_matches': len(gt_matches),
+                'avg_confidence': np.mean([m.match_confidence for m in matches]) if matches else 0,
+                'avg_normal_similarity': np.mean([m.normal_similarity for m in matches]) if matches else 0,
+                'gt_coverage': len(gt_matches) / len(matches) if matches else 0
+            }
+        
+        # Fragment connectivity
+        for frag_name in self.hierarchical_clusters.keys():
+            fragment_connections = {}
             
-            for i in range(len(scales) - 1):
-                for small in by_scale[scales[i]]:
-                    for large in by_scale[scales[i + 1]]:
-                        dist = np.linalg.norm(
-                            np.array(small['barycenter']) - np.array(large['barycenter'])
-                        )
-                        if dist < large['scale'] / 2:
-                            hierarchy.append({
-                                'parent': large['cluster_id'],
-                                'child': small['cluster_id'],
-                                'scale_ratio': scales[i + 1] / scales[i]
-                            })
+            for scale, matches in all_matches_by_scale.items():
+                connections = [m for m in matches if frag_name in [m.fragment_1, m.fragment_2]]
+                fragment_connections[scale] = len(connections)
             
-            features['multi_scale_hierarchy'][fragment_name] = hierarchy
+            features['fragment_connectivity'][frag_name] = fragment_connections
         
         return features
     
-    def _save_assembly_knowledge(self, cluster_matches, assembly_graph, topology_features):
-        """Save all results."""
-        output_file = self.output_dir / "cluster_assembly_with_gt.h5"
+    def _save_multi_scale_results(self, all_matches_by_scale: Dict, 
+                                assembly_graph: nx.Graph, topology_features: Dict):
+        """Save all results in HDF5 format."""
+        
+        output_file = self.output_dir / "unified_multi_scale_assembly.h5"
         
         with h5py.File(output_file, 'w') as f:
-            # Save matches
-            matches_group = f.create_group('cluster_matches')
-            
-            if cluster_matches:
+            # Save matches by scale
+            for scale, matches in all_matches_by_scale.items():
+                if not matches:
+                    continue
+                
+                scale_group = f.create_group(f'matches_{scale}')
+                
                 # Convert to arrays
-                data = {
-                    'cluster_id_1': [m.cluster_id_1 for m in cluster_matches],
-                    'cluster_id_2': [m.cluster_id_2 for m in cluster_matches],
-                    'fragment_1': [m.fragment_1.encode('utf8') for m in cluster_matches],
-                    'fragment_2': [m.fragment_2.encode('utf8') for m in cluster_matches],
-                    'distances': [m.distance for m in cluster_matches],
-                    'normal_similarities': [m.normal_similarity for m in cluster_matches],
-                    'is_ground_truth': [m.is_ground_truth for m in cluster_matches],
-                    'confidences': [m.confidence for m in cluster_matches],
-                    'gt_confidences': [m.gt_confidence for m in cluster_matches]
+                data_arrays = {
+                    'fragment_1': [m.fragment_1.encode('utf8') for m in matches],
+                    'fragment_2': [m.fragment_2.encode('utf8') for m in matches],
+                    'cluster_id_1': [m.cluster_id_1.encode('utf8') for m in matches],
+                    'cluster_id_2': [m.cluster_id_2.encode('utf8') for m in matches],
+                    'local_id_1': [m.local_id_1 for m in matches],
+                    'local_id_2': [m.local_id_2 for m in matches],
+                    'normal_similarity': [m.normal_similarity for m in matches],
+                    'size_similarity': [m.size_similarity for m in matches],
+                    'shape_similarity': [m.shape_similarity for m in matches],
+                    'spatial_proximity': [m.spatial_proximity for m in matches],
+                    'match_confidence': [m.match_confidence for m in matches],
+                    'is_ground_truth': [m.is_ground_truth for m in matches],
+                    'gt_confidence': [m.gt_confidence for m in matches],
+                    'gt_overlap_ratio_1': [m.gt_overlap_ratio_1 for m in matches],
+                    'gt_overlap_ratio_2': [m.gt_overlap_ratio_2 for m in matches],
+                    'gt_contact_type': [m.gt_contact_type.encode('utf8') for m in matches]
                 }
                 
-                for key, values in data.items():
-                    matches_group.create_dataset(key, data=np.array(values))
+                for key, values in data_arrays.items():
+                    scale_group.create_dataset(key, data=np.array(values))
             
             # Save metadata
             metadata = f.create_group('metadata')
-            metadata.attrs['n_matches'] = len(cluster_matches)
-            metadata.attrs['n_gt_matches'] = sum(1 for m in cluster_matches if m.is_ground_truth)
-            metadata.attrs['contact_threshold'] = self.contact_threshold
-            metadata.attrs['using_positioned_fragments'] = self.using_positioned
-            metadata.attrs['has_cluster_level_gt'] = 'cluster_ground_truth_matches' in self.ground_truth
+            metadata.attrs['scales_processed'] = [s.encode('utf8') for s in self.scales]
+            metadata.attrs['total_fragments'] = len(self.hierarchical_clusters)
+            
+            for scale in self.scales:
+                matches = all_matches_by_scale.get(scale, [])
+                metadata.attrs[f'total_matches_{scale}'] = len(matches)
+                metadata.attrs[f'gt_matches_{scale}'] = sum(1 for m in matches if m.is_ground_truth)
         
-        logger.info(f"Saved assembly knowledge to {output_file}")
-        
-        # Save summary report
-        self._save_summary_report(cluster_matches, assembly_graph)
+        logger.info(f"Saved unified assembly results to {output_file}")
     
-    def _save_summary_report(self, cluster_matches, assembly_graph):
-        """Save human-readable summary."""
-        report_file = self.output_dir / "assembly_with_cluster_gt_report.txt"
+    def _generate_comprehensive_report(self, all_matches_by_scale: Dict):
+        """Generate comprehensive human-readable report."""
+        
+        report_file = self.output_dir / "unified_assembly_report.txt"
         
         with open(report_file, 'w') as f:
-            f.write("ASSEMBLY EXTRACTION WITH CLUSTER-LEVEL GT REPORT\n")
+            f.write("UNIFIED MULTI-SCALE ASSEMBLY EXTRACTION REPORT\n")
             f.write("="*80 + "\n\n")
             
-            # Overall statistics
-            f.write("SUMMARY:\n")
-            f.write(f"Total matches: {len(cluster_matches)}\n")
+            # Overall summary
+            total_matches = sum(len(matches) for matches in all_matches_by_scale.values())
+            total_gt = sum(sum(1 for m in matches if m.is_ground_truth) 
+                          for matches in all_matches_by_scale.values())
             
-            gt_matches = [m for m in cluster_matches if m.is_ground_truth]
-            f.write(f"Ground truth matches: {len(gt_matches)}\n")
-            if len(cluster_matches) > 0:
-                f.write(f"Ground truth percentage: {len(gt_matches)/len(cluster_matches)*100:.1f}%\n\n")
-            else:
-                f.write("Ground truth percentage: N/A (no matches found)\n\n")
+            f.write("OVERALL SUMMARY:\n")
+            f.write(f"Total matches across all scales: {total_matches:,}\n")
+            f.write(f"Ground truth matches: {total_gt:,}\n")
+            f.write(f"GT percentage: {total_gt/total_matches*100:.1f}%\n\n")
             
-            # GT source info
-            if 'cluster_ground_truth_matches' in self.ground_truth:
-                f.write("Using cluster-level ground truth\n")
-                f.write(f"Total GT matches in file: {len(self.ground_truth['cluster_ground_truth_matches'])}\n\n")
-            else:
-                f.write("Using fragment-level ground truth (no cluster GT available)\n\n")
+            # Scale-wise breakdown
+            f.write("SCALE-WISE BREAKDOWN:\n")
+            f.write("-"*50 + "\n")
             
-            # Matches by fragment pair
-            f.write("MATCHES BY FRAGMENT PAIR:\n")
-            f.write("-"*80 + "\n")
-            pair_matches = {}
-            for match in cluster_matches:
-                pair = tuple(sorted([match.fragment_1, match.fragment_2]))
-                if pair not in pair_matches:
-                    pair_matches[pair] = {'total': 0, 'gt': 0, 'matches': []}
-                pair_matches[pair]['total'] += 1
-                if match.is_ground_truth:
-                    pair_matches[pair]['gt'] += 1
-                pair_matches[pair]['matches'].append(match)
-            
-            for pair, stats in sorted(pair_matches.items()):
-                f.write(f"\n{pair[0]} <-> {pair[1]}: {stats['total']} matches ({stats['gt']} GT)\n")
+            for scale in self.scales:
+                matches = all_matches_by_scale.get(scale, [])
+                gt_matches = [m for m in matches if m.is_ground_truth]
                 
-                # Show top GT matches for this pair
-                gt_matches_pair = sorted([m for m in stats['matches'] if m.is_ground_truth], 
-                                       key=lambda m: m.gt_confidence, reverse=True)
-                if gt_matches_pair:
-                    f.write("  Top GT matches:\n")
-                    for m in gt_matches_pair[:3]:
-                        f.write(f"    C{m.cluster_id_1} <-> C{m.cluster_id_2}: "
-                               f"conf={m.confidence:.3f}, gt_conf={m.gt_confidence:.3f}, "
-                               f"dist={m.distance:.1f}mm\n")
+                f.write(f"\n{scale.upper()} Scale:\n")
+                f.write(f"  Total matches: {len(matches):,}\n")
+                f.write(f"  GT matches: {len(gt_matches):,}\n")
+                
+                if matches:
+                    f.write(f"  GT percentage: {len(gt_matches)/len(matches)*100:.1f}%\n")
+                    f.write(f"  Avg confidence: {np.mean([m.match_confidence for m in matches]):.3f}\n")
+                    f.write(f"  Avg normal similarity: {np.mean([m.normal_similarity for m in matches]):.3f}\n")
+                
+                # Top matches by confidence
+                if matches:
+                    top_matches = sorted(matches, key=lambda m: m.match_confidence, reverse=True)[:5]
+                    f.write(f"  Top 5 matches by confidence:\n")
+                    for i, m in enumerate(top_matches[:5]):
+                        gt_marker = " (GT)" if m.is_ground_truth else ""
+                        f.write(f"    {i+1}. {m.cluster_id_1} ↔ {m.cluster_id_2}: "
+                               f"conf={m.match_confidence:.3f}, norm={m.normal_similarity:.3f}{gt_marker}\n")
             
-            # Top ground truth matches overall
-            if gt_matches:
-                f.write("\n\nTOP GROUND TRUTH MATCHES OVERALL:\n")
-                f.write("-"*80 + "\n")
-                for i, match in enumerate(sorted(gt_matches, key=lambda m: m.gt_confidence, reverse=True)[:15]):
-                    f.write(f"\n{i+1}. {match.fragment_1}:C{match.cluster_id_1} <-> "
-                           f"{match.fragment_2}:C{match.cluster_id_2}\n")
-                    f.write(f"   Distance: {match.distance:.2f}mm\n")
-                    f.write(f"   Normal similarity: {match.normal_similarity:.3f}\n")
-                    f.write(f"   Match confidence: {match.confidence:.3f}\n")
-                    f.write(f"   GT confidence: {match.gt_confidence:.3f}\n")
+            # GT analysis
+            f.write(f"\nGROUND TRUTH ANALYSIS:\n")
+            f.write("-"*50 + "\n")
             
-            # Graph statistics
-            f.write("\n\nGRAPH STATISTICS:\n")
-            f.write("-"*80 + "\n")
-            f.write(f"Nodes: {assembly_graph.number_of_nodes()}\n")
-            f.write(f"Edges: {assembly_graph.number_of_edges()}\n")
+            all_gt_matches = []
+            for matches in all_matches_by_scale.values():
+                all_gt_matches.extend([m for m in matches if m.is_ground_truth])
             
-            intra_edges = [e for e in assembly_graph.edges(data=True) if e[2].get('type') == 'intra_fragment']
-            inter_edges = [e for e in assembly_graph.edges(data=True) if e[2].get('type') == 'inter_fragment']
-            gt_edges = [e for e in inter_edges if e[2].get('is_ground_truth', False)]
-            
-            f.write(f"Intra-fragment edges: {len(intra_edges)}\n")
-            f.write(f"Inter-fragment edges: {len(inter_edges)}\n")
-            f.write(f"Ground truth edges: {len(gt_edges)}\n")
+            if all_gt_matches:
+                f.write(f"Total GT matches found: {len(all_gt_matches)}\n")
+                
+                # GT confidence distribution
+                gt_confidences = [m.gt_confidence for m in all_gt_matches if m.gt_confidence > 0]
+                if gt_confidences:
+                    f.write(f"GT confidence - avg: {np.mean(gt_confidences):.3f}, "
+                           f"min: {np.min(gt_confidences):.3f}, max: {np.max(gt_confidences):.3f}\n")
+                
+                # Contact type distribution
+                contact_types = {}
+                for m in all_gt_matches:
+                    ct = m.gt_contact_type or 'unknown'
+                    contact_types[ct] = contact_types.get(ct, 0) + 1
+                
+                f.write(f"Contact type distribution:\n")
+                for ct, count in sorted(contact_types.items()):
+                    f.write(f"  {ct}: {count}\n")
         
-        logger.info(f"Saved report to {report_file}")
+        logger.info(f"Saved comprehensive report to {report_file}")
 
 
 def main():
+    """Main function."""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Enhanced Assembly Extraction with Cluster GT")
-    parser.add_argument("--clusters", default="output/feature_clusters_fixed.pkl",
-                       help="Path to cluster file")
+    parser = argparse.ArgumentParser(description="Unified Multi-Scale Assembly Extraction")
+    parser.add_argument("--clusters", default="output/feature_clusters.pkl",
+                       help="Path to hierarchical cluster file")
     parser.add_argument("--segments", default="output/segmented_fragments.pkl",
                        help="Path to segmentation file")
-    parser.add_argument("--ground_truth", default="Ground_Truth/cluster_level_ground_truth.json",
-                       help="Path to ground truth file")
+    parser.add_argument("--ground_truth", default="Ground_Truth/multi_scale_cluster_ground_truth.json",
+                       help="Path to multi-scale ground truth file")
     parser.add_argument("--ply_dir", default="Ground_Truth/reconstructed/artifact_1",
                        help="Directory with PLY files")
     parser.add_argument("--output_dir", default="output",
                        help="Output directory")
+    parser.add_argument("--scales", nargs='+', default=["1k", "5k", "10k"],
+                       help="Scales to process")
     
     args = parser.parse_args()
     
-    # Run extraction
-    extractor = EnhancedAssemblyExtractor(
-        clusters_file=args.clusters,
-        segments_file=args.segments,
-        ground_truth_file=args.ground_truth,
-        ply_dir=args.ply_dir,
-        output_dir=args.output_dir
-    )
-    
-    cluster_matches, assembly_graph = extractor.extract_assembly_knowledge()
-    
-    logger.info("\nEnhanced assembly extraction complete!")
+    try:
+        # Initialize extractor
+        extractor = UnifiedAssemblyExtractor(
+            clusters_file=args.clusters,
+            segments_file=args.segments,
+            ground_truth_file=args.ground_truth,
+            ply_dir=args.ply_dir,
+            output_dir=args.output_dir,
+            scales=args.scales
+        )
+        
+        # Extract assembly knowledge
+        all_matches_by_scale, assembly_graph = extractor.extract_multi_scale_assembly_knowledge()
+        
+        # Print summary
+        print("\n" + "="*70)
+        print("UNIFIED ASSEMBLY EXTRACTION COMPLETE")
+        print("="*70)
+        
+        total_matches = sum(len(matches) for matches in all_matches_by_scale.values())
+        total_gt = sum(sum(1 for m in matches if m.is_ground_truth) 
+                      for matches in all_matches_by_scale.values())
+        
+        print(f"\nTotal matches: {total_matches:,}")
+        print(f"GT labeled matches: {total_gt:,}")
+        print(f"GT percentage: {total_gt/total_matches*100:.1f}%")
+        
+        print(f"\nMatches by scale:")
+        for scale in args.scales:
+            matches = all_matches_by_scale.get(scale, [])
+            gt_count = sum(1 for m in matches if m.is_ground_truth)
+            print(f"  {scale.upper()}: {len(matches):,} total ({gt_count:,} GT)")
+        
+        print(f"\nResults saved to: {args.output_dir}")
+        
+        logger.info("Unified assembly extraction completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"Assembly extraction failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":
