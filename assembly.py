@@ -17,7 +17,7 @@ from tqdm import tqdm
 import networkx as nx
 import open3d as o3d
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Copy for pickle compatibility
@@ -95,15 +95,12 @@ class UnifiedAssemblyExtractor:
         
     def _load_unified_data(self, clusters_file, segments_file, ground_truth_file):
         """Load data from unified pipeline."""
-        logger.info("Loading unified pipeline data...")
         
         # Load hierarchical clusters
         try:
             with open(clusters_file, 'rb') as f:
                 self.hierarchical_clusters = pickle.load(f)
-            logger.info("Loaded hierarchical cluster data")
         except (AttributeError, ImportError) as e:
-            logger.warning(f"Failed to load hierarchical clusters: {e}")
             # Try flat format
             flat_file = Path(clusters_file).parent / "feature_clusters_flat.pkl"
             if flat_file.exists():
@@ -119,15 +116,8 @@ class UnifiedAssemblyExtractor:
         if Path(ground_truth_file).exists():
             with open(ground_truth_file, 'r') as f:
                 self.ground_truth = json.load(f)
-            logger.info("Loaded multi-scale ground truth")
         else:
-            logger.error(f"Ground truth file not found: {ground_truth_file}")
             self.ground_truth = {'cluster_ground_truth_matches_by_scale': {}}
-        
-        logger.info(f"Loaded data for {len(self.hierarchical_clusters)} fragments")
-        for frag_name, scales in self.hierarchical_clusters.items():
-            for scale_name, clusters in scales.items():
-                logger.info(f"  {frag_name} - {scale_name}: {len(clusters)} clusters")
     
     def _load_flat_clusters(self, flat_file: Path):
         """Convert flat cluster data to hierarchical."""
@@ -167,7 +157,6 @@ class UnifiedAssemblyExtractor:
     
     def _build_gt_lookup(self):
         """Build lookup table for ground truth labeling only."""
-        logger.info("Building ground truth lookup for labeling...")
         
         self.gt_matches_by_scale = {}
         
@@ -191,25 +180,20 @@ class UnifiedAssemblyExtractor:
                 
                 self.gt_matches_by_scale[scale][key1] = match
                 self.gt_matches_by_scale[scale][key2] = match
-            
-            logger.info(f"Scale {scale}: {len(scale_matches)} GT matches loaded")
     
     def _load_fragments_and_find_contacts(self):
         """Load fragment point clouds and find contact pairs using same method as GT script."""
-        logger.info("Loading fragments and finding contact pairs...")
         
         self.fragments = {}
         
         # Load all PLY files
         ply_files = sorted(self.ply_dir.glob("*.ply"))
-        logger.info(f"Loading {len(ply_files)} fragment point clouds...")
         
         for ply_file in ply_files:
             fragment_name = ply_file.stem
             
             # Skip if not in our cluster data
             if fragment_name not in self.hierarchical_clusters:
-                logger.warning(f"Fragment {fragment_name} not found in cluster data")
                 continue
             
             # Load point cloud
@@ -225,19 +209,11 @@ class UnifiedAssemblyExtractor:
                 'n_points': len(points)
             }
         
-        logger.info(f"Loaded {len(self.fragments)} fragments")
-        
         # Find contact pairs using same method as GT script
         self.contact_pairs = self._find_fragment_contacts()
-        logger.info(f"Found {len(self.contact_pairs)} fragment contact pairs")
-        
-        # Print contact pairs for verification
-        for i, (frag1, frag2) in enumerate(self.contact_pairs):
-            logger.info(f"  Contact pair {i+1}: {frag1} ↔ {frag2}")
     
     def _find_fragment_contacts(self):
         """Find which fragments are in contact using same method as GT script."""
-        logger.info("Finding fragment contacts...")
         
         fragment_names = sorted(self.fragments.keys())
         contact_pairs = []
@@ -283,19 +259,20 @@ class UnifiedAssemblyExtractor:
     
     def extract_multi_scale_assembly_knowledge(self):
         """Extract assembly knowledge across all scales."""
-        logger.info("Extracting multi-scale assembly knowledge...")
+        
+        print(f"Processing {len(self.contact_pairs)} contact pairs:")
+        for i, (frag1, frag2) in enumerate(self.contact_pairs):
+            print(f"  {i+1}. {frag1} ↔ {frag2}")
         
         all_matches_by_scale = {}
         
         # Process each scale separately
         for scale in self.scales:
-            logger.info(f"\nProcessing scale: {scale}")
             scale_matches = self._extract_scale_matches(scale)
             all_matches_by_scale[scale] = scale_matches
-            
-            logger.info(f"Scale {scale}: {len(scale_matches)} total matches")
-            gt_matches = [m for m in scale_matches if m.is_ground_truth]
-            logger.info(f"Scale {scale}: {len(gt_matches)} GT labeled matches")
+        
+        # Print precision analysis
+        self._print_precision_analysis(all_matches_by_scale)
         
         # Build multi-scale assembly graph
         assembly_graph = self._build_multi_scale_graph(all_matches_by_scale)
@@ -321,11 +298,7 @@ class UnifiedAssemblyExtractor:
             if scale in scales_dict and len(scales_dict[scale]) > 0
         ]
         
-        logger.info(f"Scale {scale}: {len(fragments_with_scale)} fragments with clusters")
-        
         # Only compare contact pairs instead of all possible pairs
-        logger.info(f"Scale {scale}: Processing {len(self.contact_pairs)} contact pairs")
-        
         for frag1, frag2 in self.contact_pairs:
             # Skip if either fragment doesn't have clusters at this scale
             if frag1 not in fragments_with_scale or frag2 not in fragments_with_scale:
@@ -333,10 +306,6 @@ class UnifiedAssemblyExtractor:
                 
             pair_matches = self._compare_fragment_pair_at_scale(frag1, frag2, scale)
             scale_matches.extend(pair_matches)
-            
-            if pair_matches:
-                gt_count = sum(1 for m in pair_matches if m.is_ground_truth)
-                logger.info(f"  {frag1} ↔ {frag2}: {len(pair_matches)} matches ({gt_count} GT)")
         
         return scale_matches
     
@@ -352,6 +321,7 @@ class UnifiedAssemblyExtractor:
         pair_matches = []
         
         # Compare EVERY cluster from frag1 with EVERY cluster from frag2
+        # BUT only in one direction to avoid duplicates
         for i, cluster1 in enumerate(clusters1):
             for j, cluster2 in enumerate(clusters2):
                 
@@ -365,10 +335,6 @@ class UnifiedAssemblyExtractor:
                 
                 # Store ALL matches (no filtering by distance/confidence)
                 pair_matches.append(match)
-        
-        # Also check for GT matches that weren't found
-        missing_gt_matches = self._find_missing_gt_matches(frag1, frag2, scale, pair_matches)
-        pair_matches.extend(missing_gt_matches)
         
         return pair_matches
     
@@ -535,6 +501,83 @@ class UnifiedAssemblyExtractor:
             logger.info(f"Added {len(missing_matches)} missing GT matches for {frag1} ↔ {frag2}")
         
         return missing_matches
+    
+    def _count_gt_matches_for_pair(self, frag1: str, frag2: str, scale: str) -> int:
+        """Count how many GT matches exist for a specific fragment pair at a scale."""
+        gt_lookup = self.gt_matches_by_scale.get(scale, {})
+        count = 0
+        
+        for key in gt_lookup.keys():
+            gt_frag1, gt_local1, gt_frag2, gt_local2 = key
+            
+            # Check if this GT match involves our fragment pair (either direction)
+            if ((gt_frag1 == frag1 and gt_frag2 == frag2) or 
+                (gt_frag1 == frag2 and gt_frag2 == frag1)):
+                count += 1
+        
+        # Since we store bidirectional keys, divide by 2 to get actual matches
+        return count // 2
+    
+    def _print_precision_analysis(self, all_matches_by_scale: Dict):
+        """Print precision analysis: True Positives vs False Positives per pair."""
+        print("\n" + "="*80)
+        print("PRECISION ANALYSIS: TP vs FP vs GT (with Recall)")
+        print("="*80)
+        
+        for scale in self.scales:
+            matches = all_matches_by_scale.get(scale, [])
+            if not matches:
+                continue
+                
+            print(f"\n{scale.upper()} SCALE:")
+            print("-" * 50)
+            
+            # Group matches by fragment pair (normalize pair order)
+            pair_stats = {}
+            for match in matches:
+                # Always put smaller fragment name first to avoid duplicates
+                frag_a, frag_b = sorted([match.fragment_1, match.fragment_2])
+                pair_key = (frag_a, frag_b)
+                if pair_key not in pair_stats:
+                    pair_stats[pair_key] = {'total': 0, 'gt': 0}
+                pair_stats[pair_key]['total'] += 1
+                if match.is_ground_truth:
+                    pair_stats[pair_key]['gt'] += 1
+            
+            # Calculate overall metrics
+            total_predicted = len(matches)
+            total_true_positives = sum(1 for m in matches if m.is_ground_truth)
+            total_false_positives = total_predicted - total_true_positives
+            
+            # Count total GT matches available for this scale
+            total_gt_available = len(self.gt_matches_by_scale.get(scale, {})) // 2  # Divide by 2 for bidirectional
+            
+            print(f"OVERALL: {total_predicted} predicted, {total_true_positives} TP, {total_false_positives} FP")
+            print(f"GT AVAILABLE: {total_gt_available} total GT matches in this scale")
+            if total_predicted > 0:
+                precision = total_true_positives / total_predicted
+                print(f"PRECISION: {precision:.3f} ({precision*100:.1f}%)")
+            if total_gt_available > 0:
+                recall = total_true_positives / total_gt_available
+                print(f"RECALL: {recall:.3f} ({recall*100:.1f}%)")
+            
+            print(f"\nPER FRAGMENT PAIR:")
+            print("Format: Pair → Predicted | TP | FP | GT_Available | Precision | Recall")
+            print("-" * 80)
+            
+            for (frag1, frag2), stats in sorted(pair_stats.items()):
+                total = stats['total']
+                tp = stats['gt']
+                fp = total - tp
+                precision = tp / total if total > 0 else 0
+                
+                # Count GT matches available for this specific pair
+                gt_available = self._count_gt_matches_for_pair(frag1, frag2, scale)
+                recall = tp / gt_available if gt_available > 0 else 0
+                
+                print(f"  {frag1} ↔ {frag2}: {total:4d} | {tp:3d} | {fp:4d} | {gt_available:3d} | {precision:.3f} | {recall:.3f}")
+        
+        print("\n" + "="*80)
     
     def _build_multi_scale_graph(self, all_matches_by_scale: Dict) -> nx.Graph:
         """Build assembly graph with multi-scale edges."""
@@ -779,19 +822,14 @@ def main():
         total_gt = sum(sum(1 for m in matches if m.is_ground_truth) 
                       for matches in all_matches_by_scale.values())
         
-        print(f"\nTotal matches: {total_matches:,}")
-        print(f"GT labeled matches: {total_gt:,}")
-        print(f"GT percentage: {total_gt/total_matches*100:.1f}%")
-        
-        print(f"Contact pairs found: {len(extractor.contact_pairs)}")
-        for i, (frag1, frag2) in enumerate(extractor.contact_pairs):
-            print(f"  {i+1}. {frag1} ↔ {frag2}")
-        
-        print(f"\nMatches by scale:")
-        for scale in args.scales:
-            matches = all_matches_by_scale.get(scale, [])
-            gt_count = sum(1 for m in matches if m.is_ground_truth)
-            print(f"  {scale.upper()}: {len(matches):,} total ({gt_count:,} GT)")
+        print(f"\nOVERALL SUMMARY:")
+        print(f"Contact pairs: {len(extractor.contact_pairs)}")
+        print(f"Total matches: {total_matches:,}")
+        print(f"True positives: {total_gt:,}")
+        print(f"False positives: {total_matches - total_gt:,}")
+        if total_matches > 0:
+            precision = total_gt / total_matches
+            print(f"Overall precision: {precision:.3f} ({precision*100:.1f}%)")
         
         print(f"\nResults saved to: {args.output_dir}")
         
