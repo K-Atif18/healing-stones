@@ -350,7 +350,7 @@ class GTClusterVisualizer:
             point_indices = getattr(cluster, 'original_point_indices', 
                                   getattr(cluster, 'point_indices', []))
         
-        if not point_indices:
+        if point_indices is None or len(point_indices) == 0:
             return None
         
         # Load full point cloud
@@ -362,9 +362,12 @@ class GTClusterVisualizer:
         all_points = np.asarray(pcd_full.points)
         
         # Handle point indices safely
-        valid_indices = [idx for idx in point_indices if 0 <= idx < len(all_points)]
+        if isinstance(point_indices, (list, np.ndarray)):
+            valid_indices = [idx for idx in point_indices if 0 <= idx < len(all_points)]
+        else:
+            valid_indices = []
         
-        if not valid_indices:
+        if len(valid_indices) == 0:
             return None
         
         cluster_points = all_points[valid_indices]
