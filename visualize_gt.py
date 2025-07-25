@@ -13,9 +13,29 @@ import argparse
 import logging
 from typing import Dict, List, Tuple, Optional
 import time
+from dataclasses import dataclass
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Copy of SurfaceCluster class for pickle compatibility
+@dataclass
+class SurfaceCluster:
+    """Cluster representation - copy for pickle compatibility."""
+    cluster_id: str
+    fragment_name: str
+    point_count_scale: int
+    scale_name: str
+    local_id: int
+    barycenter: np.ndarray
+    principal_axes: np.ndarray
+    eigenvalues: np.ndarray
+    size_signature: float
+    anisotropy_signature: float
+    point_count: int
+    point_indices: List[int]
+    original_point_indices: List[int]
+    neighbors: List[str] = None
 
 class GTClusterVisualizer:
     """Interactive visualizer for ground truth cluster matches."""
@@ -60,13 +80,69 @@ class GTClusterVisualizer:
         logger.info(f"Processed matches for {len(self.matches_lookup)} fragment pairs")
     
     def _load_cluster_data(self):
-        """Load cluster data for point mapping."""
+        """Load cluster data for point mapping with fallback options."""
         logger.info(f"Loading cluster data from {self.clusters_file}")
         
-        with open(self.clusters_file, 'rb') as f:
-            self.cluster_data = pickle.load(f)
+        try:
+            with open(self.clusters_file, 'rb') as f:
+                self.cluster_data = pickle.load(f)
+            logger.info("Successfully loaded hierarchical cluster data")
+        except (AttributeError, ImportError) as e:
+            logger.warning(f"Failed to load hierarchical clusters: {e}")
+            
+            # Try flat format as fallback
+            flat_file = self.clusters_file.parent / "feature_clusters_flat.pkl"
+            if flat_file.exists():
+                logger.info("Trying flat cluster format...")
+                self._load_flat_clusters(flat_file)
+            else:
+                logger.error("No compatible cluster file found!")
+                raise FileNotFoundError(f"Neither hierarchical nor flat cluster file found!")
         
         logger.info("Cluster data loaded successfully")
+    
+    def _load_flat_clusters(self, flat_file: Path):
+        """Load flat cluster data and convert to hierarchical."""
+        with open(flat_file, 'rb') as f:
+            flat_data = pickle.load(f)
+        
+        if isinstance(flat_data, dict) and 'clusters' in flat_data:
+            clusters = flat_data['clusters']
+        else:
+            clusters = flat_data
+        
+        # Convert to hierarchical structure
+        self.cluster_data = {}
+        
+        for cluster_data in clusters:
+            # Handle both object and dict formats
+            if hasattr(cluster_data, 'fragment_name'):
+                # Object format
+                fragment = cluster_data.fragment_name
+                scale = cluster_data.scale_name
+                cluster_dict = {
+                    'cluster_id': cluster_data.cluster_id,
+                    'barycenter': cluster_data.barycenter,
+                    'point_count': cluster_data.point_count,
+                    'point_indices': cluster_data.point_indices,
+                    'original_point_indices': getattr(cluster_data, 'original_point_indices', []),
+                    'eigenvalues': cluster_data.eigenvalues,
+                    'local_id': cluster_data.local_id
+                }
+            else:
+                # Dict format
+                fragment = cluster_data.get('fragment', 'unknown')
+                scale = cluster_data.get('scale', '1k')
+                cluster_dict = cluster_data
+            
+            if fragment not in self.cluster_data:
+                self.cluster_data[fragment] = {}
+            if scale not in self.cluster_data[fragment]:
+                self.cluster_data[fragment][scale] = []
+            
+            self.cluster_data[fragment][scale].append(cluster_dict)
+        
+        logger.info("Successfully converted flat clusters to hierarchical structure")
     
     def list_contact_pairs(self):
         """List all available contact pairs with match counts."""
