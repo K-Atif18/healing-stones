@@ -75,18 +75,23 @@ class UnifiedAssemblyExtractor:
                  ground_truth_file: str = "Ground_Truth/multi_scale_cluster_ground_truth.json",
                  ply_dir: str = "Ground_Truth/reconstructed/artifact_1",
                  output_dir: str = "output",
-                 scales: List[str] = ["1k", "5k", "10k"]):
+                 scales: List[str] = ["1k", "5k", "10k"],
+                 contact_threshold: float = 2.0):
         
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.ply_dir = Path(ply_dir)
         self.scales = scales
+        self.contact_threshold = contact_threshold
         
         # Load all data
         self._load_unified_data(clusters_file, segments_file, ground_truth_file)
         
         # Build ground truth lookup for labeling
         self._build_gt_lookup()
+        
+        # Load fragment point clouds and find contact pairs
+        self._load_fragments_and_find_contacts()
         
     def _load_unified_data(self, clusters_file, segments_file, ground_truth_file):
         """Load data from unified pipeline."""
@@ -189,6 +194,93 @@ class UnifiedAssemblyExtractor:
             
             logger.info(f"Scale {scale}: {len(scale_matches)} GT matches loaded")
     
+    def _load_fragments_and_find_contacts(self):
+        """Load fragment point clouds and find contact pairs using same method as GT script."""
+        logger.info("Loading fragments and finding contact pairs...")
+        
+        self.fragments = {}
+        
+        # Load all PLY files
+        ply_files = sorted(self.ply_dir.glob("*.ply"))
+        logger.info(f"Loading {len(ply_files)} fragment point clouds...")
+        
+        for ply_file in ply_files:
+            fragment_name = ply_file.stem
+            
+            # Skip if not in our cluster data
+            if fragment_name not in self.hierarchical_clusters:
+                logger.warning(f"Fragment {fragment_name} not found in cluster data")
+                continue
+            
+            # Load point cloud
+            pcd = o3d.io.read_point_cloud(str(ply_file))
+            if not pcd.has_points():
+                continue
+            
+            points = np.asarray(pcd.points)
+            
+            self.fragments[fragment_name] = {
+                'points': points,
+                'point_cloud': pcd,
+                'n_points': len(points)
+            }
+        
+        logger.info(f"Loaded {len(self.fragments)} fragments")
+        
+        # Find contact pairs using same method as GT script
+        self.contact_pairs = self._find_fragment_contacts()
+        logger.info(f"Found {len(self.contact_pairs)} fragment contact pairs")
+        
+        # Print contact pairs for verification
+        for i, (frag1, frag2) in enumerate(self.contact_pairs):
+            logger.info(f"  Contact pair {i+1}: {frag1} ↔ {frag2}")
+    
+    def _find_fragment_contacts(self):
+        """Find which fragments are in contact using same method as GT script."""
+        logger.info("Finding fragment contacts...")
+        
+        fragment_names = sorted(self.fragments.keys())
+        contact_pairs = []
+        
+        # Check all pairs
+        for i in range(len(fragment_names)):
+            for j in range(i + 1, len(fragment_names)):
+                frag1 = fragment_names[i]
+                frag2 = fragment_names[j]
+                
+                if self._check_fragment_contact(frag1, frag2):
+                    contact_pairs.append((frag1, frag2))
+        
+        return contact_pairs
+    
+    def _check_fragment_contact(self, frag1: str, frag2: str) -> bool:
+        """Quick check if two fragments are in contact using same method as GT script."""
+        if frag1 not in self.fragments or frag2 not in self.fragments:
+            return False
+            
+        points1 = self.fragments[frag1]['points']
+        points2 = self.fragments[frag2]['points']
+        
+        # Quick bounding box check
+        min1, max1 = np.min(points1, axis=0), np.max(points1, axis=0)
+        min2, max2 = np.min(points2, axis=0), np.max(points2, axis=0)
+        
+        for dim in range(3):
+            if min1[dim] - self.contact_threshold > max2[dim]:
+                return False
+            if min2[dim] - self.contact_threshold > max1[dim]:
+                return False
+        
+        # Sample check for efficiency
+        sample_size = min(1000, len(points1))
+        sample_indices = np.random.choice(len(points1), sample_size, replace=False)
+        sample_points = points1[sample_indices]
+        
+        tree2 = cKDTree(points2)
+        distances, _ = tree2.query(sample_points)
+        
+        return np.min(distances) < self.contact_threshold
+    
     def extract_multi_scale_assembly_knowledge(self):
         """Extract assembly knowledge across all scales."""
         logger.info("Extracting multi-scale assembly knowledge...")
@@ -220,7 +312,7 @@ class UnifiedAssemblyExtractor:
         return all_matches_by_scale, assembly_graph
     
     def _extract_scale_matches(self, scale: str) -> List[MultiScaleClusterMatch]:
-        """Extract matches for a specific scale across all fragment pairs."""
+        """Extract matches for a specific scale across contact pairs only."""
         scale_matches = []
         
         # Get all fragments that have clusters at this scale
@@ -231,18 +323,20 @@ class UnifiedAssemblyExtractor:
         
         logger.info(f"Scale {scale}: {len(fragments_with_scale)} fragments with clusters")
         
-        # Compare all fragment pairs
-        for i in range(len(fragments_with_scale)):
-            for j in range(i + 1, len(fragments_with_scale)):
-                frag1 = fragments_with_scale[i]
-                frag2 = fragments_with_scale[j]
+        # Only compare contact pairs instead of all possible pairs
+        logger.info(f"Scale {scale}: Processing {len(self.contact_pairs)} contact pairs")
+        
+        for frag1, frag2 in self.contact_pairs:
+            # Skip if either fragment doesn't have clusters at this scale
+            if frag1 not in fragments_with_scale or frag2 not in fragments_with_scale:
+                continue
                 
-                pair_matches = self._compare_fragment_pair_at_scale(frag1, frag2, scale)
-                scale_matches.extend(pair_matches)
-                
-                if pair_matches:
-                    gt_count = sum(1 for m in pair_matches if m.is_ground_truth)
-                    logger.info(f"  {frag1} ↔ {frag2}: {len(pair_matches)} matches ({gt_count} GT)")
+            pair_matches = self._compare_fragment_pair_at_scale(frag1, frag2, scale)
+            scale_matches.extend(pair_matches)
+            
+            if pair_matches:
+                gt_count = sum(1 for m in pair_matches if m.is_ground_truth)
+                logger.info(f"  {frag1} ↔ {frag2}: {len(pair_matches)} matches ({gt_count} GT)")
         
         return scale_matches
     
@@ -656,6 +750,8 @@ def main():
                        help="Output directory")
     parser.add_argument("--scales", nargs='+', default=["1k", "5k", "10k"],
                        help="Scales to process")
+    parser.add_argument("--contact_threshold", type=float, default=2.0,
+                       help="Point-to-point contact threshold in mm")
     
     args = parser.parse_args()
     
@@ -667,7 +763,8 @@ def main():
             ground_truth_file=args.ground_truth,
             ply_dir=args.ply_dir,
             output_dir=args.output_dir,
-            scales=args.scales
+            scales=args.scales,
+            contact_threshold=args.contact_threshold
         )
         
         # Extract assembly knowledge
@@ -685,6 +782,10 @@ def main():
         print(f"\nTotal matches: {total_matches:,}")
         print(f"GT labeled matches: {total_gt:,}")
         print(f"GT percentage: {total_gt/total_matches*100:.1f}%")
+        
+        print(f"Contact pairs found: {len(extractor.contact_pairs)}")
+        for i, (frag1, frag2) in enumerate(extractor.contact_pairs):
+            print(f"  {i+1}. {frag1} ↔ {frag2}")
         
         print(f"\nMatches by scale:")
         for scale in args.scales:
