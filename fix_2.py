@@ -301,7 +301,14 @@ class SegmentIndexGenerator:
         
         logger.info("\nSaved segmented_fragments_with_indices.pkl")
         return segment_data
-
+'''logger.info("FIXES APPLIED")
+        logger.info("="*70)
+        logger.info("\n1. Generated segment_indices in segmented_fragments_with_indices.pkl")
+        logger.info("2. Created simple_cluster_gt.json for testing")
+        logger.info("\nNext steps:")
+        logger.info("1. Update assembly script to use segmented_fragments_with_indices.pkl")
+        logger.info("2. Test with simple_cluster_gt.json first")
+        logger.info("3. Then run full cluster GT extraction")'''
 
 def create_simple_cluster_gt():
     """Create a simple cluster-level ground truth for testing."""
@@ -409,14 +416,7 @@ def main():
         create_simple_cluster_gt()
         
         logger.info("\n" + "="*70)
-        logger.info("FIXES APPLIED")
-        logger.info("="*70)
-        logger.info("\n1. Generated segment_indices in segmented_fragments_with_indices.pkl")
-        logger.info("2. Created simple_cluster_gt.json for testing")
-        logger.info("\nNext steps:")
-        logger.info("1. Update assembly script to use segmented_fragments_with_indices.pkl")
-        logger.info("2. Test with simple_cluster_gt.json first")
-        logger.info("3. Then run full cluster GT extraction")
+        
 
 
 if __name__ == "__main__":
