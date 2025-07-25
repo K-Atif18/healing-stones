@@ -615,7 +615,7 @@ class ForwardSearchMatcher:
             # Evaluate predictions
             predicted_set = set()
             for pred in predicted_matches:
-                if pred['confidence'] > 0.3:  # Lowered threshold from 0.5 to 0.3
+                if pred['confidence'] > 0.05:  # Lowered threshold from 0.3 to 0.05
                     predicted_set.add((pred['cluster_id_1'], pred['cluster_id_2']))
                     all_confidences.append(pred['confidence'])
                     all_gt_labels.append(1 if (pred['cluster_id_1'], pred['cluster_id_2']) in gt_matches else 0)
@@ -739,10 +739,21 @@ class ForwardSearchMatcher:
                     if distance > 100:  # 100mm threshold
                         continue
                     
-                    distance_tensor = torch.FloatTensor([[distance]])
+                    # Compute actual normal similarity using principal axes
+                    # Extract principal axes from features (after eigenvalues)
+                    # Features are: barycenter(3) + size(1) + aniso(1) + eigenvalues(3) + scale(1)
+                    # We need to get the actual principal axes from the cluster data
                     
-                    # Simple normal similarity (could be improved)
-                    normal_sim = 0.5
+                    # For now, use a better estimate based on cluster properties
+                    # If clusters are similar in size and anisotropy, they likely match better
+                    size_diff = abs(feat1[3] - feat2[3]) / max(feat1[3], feat2[3])
+                    aniso_diff = abs(feat1[4] - feat2[4]) / max(feat1[4], feat2[4], 0.1)
+                    
+                    # Estimate normal similarity based on shape similarity
+                    shape_similarity = 1.0 / (1.0 + size_diff + aniso_diff)
+                    normal_sim = shape_similarity * 0.5 + 0.3  # Scale to reasonable range
+                    
+                    distance_tensor = torch.FloatTensor([[distance]])
                     normal_sim_tensor = torch.FloatTensor([[normal_sim]])
                     
                     # Predict match score
@@ -753,7 +764,7 @@ class ForwardSearchMatcher:
                     )
                     
                     # Skip low confidence matches early
-                    if match_score.item() < 0.1:
+                    if match_score.item() < 0.05:  # Lowered from 0.1
                         continue
                     
                     # Check shape outliers
