@@ -1,501 +1,485 @@
 #!/usr/bin/env python3
 """
-Interactive 3D visualization of contact regions between fragment pairs.
-Shows fragments in different colors with contact regions highlighted.
+Ground Truth Cluster Match Visualizer
+Interactive visualization of cluster matches between fragment pairs
 """
 
 import numpy as np
 import open3d as o3d
-import pickle
 import json
-import h5py
+import pickle
 from pathlib import Path
+import argparse
 import logging
 from typing import Dict, List, Tuple, Optional
-import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-import argparse
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class ContactRegionVisualizer:
-    def __init__(self,
-                 ply_dir: str = "Ground_Truth/artifact_1",
-                 segments_file: str = "output/segmented_fragments.pkl",
-                 clusters_file: str = "output/feature_clusters_fixed.pkl",
-                 ground_truth_file: str = "Ground_Truth/ground_truth_from_positioned.json",
-                 assembly_file: str = "output/cluster_assembly_priors_improved.h5"):
-        
-        self.ply_dir = Path(ply_dir)
-        
-        # Load all data
-        logger.info("Loading data...")
-        self._load_data(segments_file, clusters_file, ground_truth_file, assembly_file)
-        
-        # Visualization parameters
-        self.contact_threshold = 10.0  # mm
-        self.point_size = 1.0
-        
-        # Check if we're using pre-positioned fragments
-        self.using_positioned = False
-        if 'extraction_info' in self.ground_truth:
-            self.using_positioned = self.ground_truth['extraction_info'].get('fragments_are_pre_positioned', False)
-            if self.using_positioned:
-                # Update PLY directory to positioned fragments
-                source_dir = self.ground_truth['extraction_info'].get('source_directory', str(self.ply_dir))
-                self.ply_dir = Path(source_dir)
-                logger.info(f"Using pre-positioned fragments from: {self.ply_dir}")
-        
-    def _load_data(self, segments_file, clusters_file, ground_truth_file, assembly_file):
-        """Load all required data."""
-        # Load segmentation data
-        with open(segments_file, 'rb') as f:
-            self.segment_data = pickle.load(f)
-        
-        # Load cluster data - try fixed file first
-        if Path(clusters_file).exists():
-            with open(clusters_file, 'rb') as f:
-                self.cluster_data = pickle.load(f)
-        elif Path("output/feature_clusters_fixed.pkl").exists():
-            with open("output/feature_clusters_fixed.pkl", 'rb') as f:
-                self.cluster_data = pickle.load(f)
-        else:
-            with open("output/feature_clusters.pkl", 'rb') as f:
-                self.cluster_data = pickle.load(f)
-        
-        # Load ground truth
-        with open(ground_truth_file, 'r') as f:
-            self.ground_truth = json.load(f)
-        
-        # Load assembly results
-        self.assembly_data = {}
-        if Path(assembly_file).exists():
-            with h5py.File(assembly_file, 'r') as f:
-                if 'cluster_matches' in f:
-                    matches = f['cluster_matches']
-                    self.assembly_data = {
-                        'cluster_id_1': matches['cluster_id_1'][:],
-                        'cluster_id_2': matches['cluster_id_2'][:],
-                        'is_ground_truth': matches['is_ground_truth'][:],
-                        'confidences': matches['confidences'][:],
-                        'fragment_1': [s.decode() if isinstance(s, bytes) else s for s in matches['fragment_1'][:]],
-                        'fragment_2': [s.decode() if isinstance(s, bytes) else s for s in matches['fragment_2'][:]]
-                    }
-        
-        # Get contact pairs
-        self.contact_pairs = self.ground_truth['contact_pairs']
-        self.contact_details = {
-            tuple(sorted([c['fragment_1'], c['fragment_2']])): c 
-            for c in self.ground_truth.get('contact_details', [])
-        }
-        
-        # Organize clusters by fragment (matching the assembly script logic)
-        self._organize_clusters_by_fragment()
-        
-        logger.info(f"Loaded {len(self.contact_pairs)} contact pairs")
-        if self.assembly_data:
-            gt_count = sum(1 for x in self.assembly_data['is_ground_truth'] if x)
-            logger.info(f"Loaded {len(self.assembly_data['cluster_id_1'])} matches ({gt_count} GT)")
+class GTClusterVisualizer:
+    """Interactive visualizer for ground truth cluster matches."""
     
-    def _organize_clusters_by_fragment(self):
-        """Organize clusters by fragment matching the assembly script."""
-        self.clusters_by_fragment = {}
-        self.cluster_lookup = {}
+    def __init__(self, 
+                 gt_file: str = "Ground_Truth/multi_scale_cluster_ground_truth.json",
+                 clusters_file: str = "output/feature_clusters.pkl",
+                 data_dir: str = "Ground_Truth/reconstructed/artifact_1"):
         
-        # Get fragment processing order (sorted)
-        fragment_names = sorted(self.segment_data.keys())
+        self.gt_file = Path(gt_file)
+        self.clusters_file = Path(clusters_file)
+        self.data_dir = Path(data_dir)
         
-        # Track cluster assignment
-        cluster_idx = 0
+        # Load data
+        self._load_ground_truth()
+        self._load_cluster_data()
         
-        for frag_name in fragment_names:
-            n_clusters = self.segment_data[frag_name].get('n_clusters', 0)
-            fragment_clusters = []
-            
-            # Assign next n_clusters to this fragment
-            for i in range(n_clusters):
-                if cluster_idx < len(self.cluster_data['clusters']):
-                    cluster = self.cluster_data['clusters'][cluster_idx].copy()
-                    cluster['fragment'] = frag_name
-                    cluster['global_id'] = cluster_idx
-                    
-                    self.cluster_lookup[cluster['cluster_id']] = cluster
-                    fragment_clusters.append(cluster)
-                    cluster_idx += 1
-            
-            self.clusters_by_fragment[frag_name] = fragment_clusters
+        logger.info(f"Loaded GT with {len(self.contact_pairs)} contact pairs")
+        
+    def _load_ground_truth(self):
+        """Load ground truth data."""
+        logger.info(f"Loading ground truth from {self.gt_file}")
+        
+        with open(self.gt_file, 'r') as f:
+            self.gt_data = json.load(f)
+        
+        # Extract contact pairs and matches by scale
+        self.contact_pairs = [tuple(pair) for pair in self.gt_data['contact_pairs']]
+        self.matches_by_scale = self.gt_data['cluster_ground_truth_matches_by_scale']
+        
+        # Create lookup for quick access
+        self.matches_lookup = {}
+        for scale, matches in self.matches_by_scale.items():
+            for match in matches:
+                pair_key = (match['fragment_1'], match['fragment_2'])
+                if pair_key not in self.matches_lookup:
+                    self.matches_lookup[pair_key] = {}
+                if scale not in self.matches_lookup[pair_key]:
+                    self.matches_lookup[pair_key][scale] = []
+                self.matches_lookup[pair_key][scale].append(match)
+        
+        logger.info(f"Processed matches for {len(self.matches_lookup)} fragment pairs")
+    
+    def _load_cluster_data(self):
+        """Load cluster data for point mapping."""
+        logger.info(f"Loading cluster data from {self.clusters_file}")
+        
+        with open(self.clusters_file, 'rb') as f:
+            self.cluster_data = pickle.load(f)
+        
+        logger.info("Cluster data loaded successfully")
     
     def list_contact_pairs(self):
-        """List all available contact pairs."""
-        print("\nAvailable contact pairs:")
-        print("-" * 40)
+        """List all available contact pairs with match counts."""
+        print("\n" + "="*70)
+        print("AVAILABLE FRAGMENT CONTACT PAIRS")
+        print("="*70)
+        
         for i, (frag1, frag2) in enumerate(self.contact_pairs):
-            contact_key = tuple(sorted([frag1, frag2]))
-            details = self.contact_details.get(contact_key, {})
-            n_points = details.get('contact_point_count', 0)
-            area = details.get('estimated_contact_area', 0)
+            print(f"\n{i+1:2d}. {frag1} ↔ {frag2}")
             
-            # Count GT matches for this pair
-            gt_matches = 0
-            if self.assembly_data:
-                for j in range(len(self.assembly_data['cluster_id_1'])):
-                    if (self.assembly_data['fragment_1'][j] == frag1 and 
-                        self.assembly_data['fragment_2'][j] == frag2 and
-                        self.assembly_data['is_ground_truth'][j]):
-                        gt_matches += 1
+            pair_matches = self.matches_lookup.get((frag1, frag2), {})
+            total_matches = sum(len(matches) for matches in pair_matches.values())
             
-            print(f"{i+1}. {frag1} <-> {frag2}")
-            print(f"   Contact points: {n_points}")
-            print(f"   Contact area: {area:.1f} mm²")
-            print(f"   GT cluster matches: {gt_matches}")
-            print()
+            if total_matches > 0:
+                print(f"     Total matches: {total_matches}")
+                for scale, matches in pair_matches.items():
+                    if matches:
+                        primary_count = sum(1 for m in matches if m['is_primary_contact'])
+                        print(f"     {scale.upper()}: {len(matches)} matches ({primary_count} primary)")
+            else:
+                print("     No cluster matches found")
+        
+        print("\n" + "="*70)
     
-    def visualize_contact_pair(self, frag1_name: str, frag2_name: str, 
-                             show_clusters: bool = True,
-                             show_gt_matches: bool = True):
-        """Visualize a specific contact pair with contact regions highlighted."""
-        logger.info(f"Visualizing contact between {frag1_name} and {frag2_name}")
+    def visualize_pair_matches(self, pair_index: int, scale: str = "1k", 
+                             top_n: int = 5, show_all: bool = False,
+                             min_confidence: float = 0.0):
+        """Visualize cluster matches for a specific fragment pair."""
         
-        # Load point clouds
-        pcd1 = self._load_fragment_pcd(frag1_name)
-        pcd2 = self._load_fragment_pcd(frag2_name)
-        
-        if pcd1 is None or pcd2 is None:
-            logger.error("Failed to load point clouds")
+        if pair_index < 1 or pair_index > len(self.contact_pairs):
+            print(f"Invalid pair index. Choose 1-{len(self.contact_pairs)}")
             return
         
-        # Transform to world coordinates
-        pcd1_world = self._transform_to_world(pcd1, frag1_name)
-        pcd2_world = self._transform_to_world(pcd2, frag2_name)
+        frag1, frag2 = self.contact_pairs[pair_index - 1]
+        logger.info(f"Visualizing matches between {frag1} and {frag2} at scale {scale}")
         
-        # Color fragments (base colors)
-        self._color_fragment_base(pcd1_world, [0.8, 0.2, 0.2])  # Red
-        self._color_fragment_base(pcd2_world, [0.2, 0.8, 0.2])  # Green
+        # Get matches for this pair and scale
+        pair_matches = self.matches_lookup.get((frag1, frag2), {})
+        scale_matches = pair_matches.get(scale, [])
         
-        # Identify and highlight contact regions
-        contact_pcd1, contact_pcd2 = self._identify_contact_regions(
-            pcd1_world, pcd2_world, frag1_name, frag2_name
-        )
+        if not scale_matches:
+            print(f"No matches found for {frag1} ↔ {frag2} at scale {scale}")
+            return
         
-        # Create visualization list
-        vis_list = [pcd1_world, pcd2_world]
+        # Filter by confidence
+        filtered_matches = [m for m in scale_matches if m['confidence'] >= min_confidence]
         
-        if contact_pcd1 is not None:
-            vis_list.append(contact_pcd1)
-        if contact_pcd2 is not None:
-            vis_list.append(contact_pcd2)
+        if not filtered_matches:
+            print(f"No matches above confidence threshold {min_confidence}")
+            return
         
-        # Add cluster visualizations if requested
-        if show_clusters:
-            cluster_spheres = self._create_cluster_spheres(frag1_name, frag2_name, show_gt_matches)
-            vis_list.extend(cluster_spheres)
+        # Sort by confidence
+        sorted_matches = sorted(filtered_matches, key=lambda m: m['confidence'], reverse=True)
         
-        # Add coordinate frame
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=50.0)
-        vis_list.append(coord_frame)
-        
-        # Create window and visualize
-        self._visualize_geometries(vis_list, f"Contact: {frag1_name} <-> {frag2_name}")
-    
-    def _load_fragment_pcd(self, fragment_name: str) -> Optional[o3d.geometry.PointCloud]:
-        """Load fragment point cloud."""
-        ply_file = self.ply_dir / f"{fragment_name}.ply"
-        
-        if not ply_file.exists():
-            logger.error(f"PLY file not found: {ply_file}")
-            return None
-        
-        pcd = o3d.io.read_point_cloud(str(ply_file))
-        
-        # Keep only break surface points
-        if fragment_name in self.segment_data:
-            break_indices = self.segment_data[fragment_name]['surface_patches'].get('break_0', [])
-            if break_indices:
-                pcd = pcd.select_by_index(break_indices)
-                logger.info(f"Loaded {fragment_name}: {len(pcd.points)} break surface points")
-        
-        return pcd
-    
-    def _transform_to_world(self, pcd: o3d.geometry.PointCloud, 
-                           fragment_name: str) -> o3d.geometry.PointCloud:
-        """Transform point cloud to world coordinates."""
-        if self.using_positioned:
-            # Fragments are already in correct positions
-            return pcd
-            
-        if fragment_name in self.ground_truth['fragments']:
-            transform = np.array(self.ground_truth['fragments'][fragment_name]['transform_matrix'])
-            pcd.transform(transform)
+        # Select matches to show
+        if show_all:
+            matches_to_show = sorted_matches
         else:
-            logger.warning(f"No transform found for {fragment_name}")
+            matches_to_show = sorted_matches[:top_n]
         
-        return pcd
+        print(f"\nShowing top {len(matches_to_show)} matches:")
+        for i, match in enumerate(matches_to_show):
+            print(f"{i+1:2d}. {match['cluster_id_1']} ↔ {match['cluster_id_2']} "
+                  f"(conf: {match['confidence']:.3f}, type: {match['contact_type']})")
+        
+        # Load and visualize
+        self._create_pair_visualization(frag1, frag2, matches_to_show, scale)
     
-    def _color_fragment_base(self, pcd: o3d.geometry.PointCloud, base_color: List[float]):
-        """Apply base color to fragment."""
-        colors = np.tile(base_color, (len(pcd.points), 1))
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-    
-    def _identify_contact_regions(self, pcd1: o3d.geometry.PointCloud, 
-                                 pcd2: o3d.geometry.PointCloud,
-                                 frag1_name: str, frag2_name: str) -> Tuple:
-        """Identify and highlight contact regions."""
-        points1 = np.asarray(pcd1.points)
-        points2 = np.asarray(pcd2.points)
+    def _create_pair_visualization(self, frag1: str, frag2: str, 
+                                 matches: List[Dict], scale: str):
+        """Create Open3D visualization for fragment pair with cluster matches."""
         
-        # Build KD-trees
-        pcd1_tree = o3d.geometry.KDTreeFlann(pcd1)
-        pcd2_tree = o3d.geometry.KDTreeFlann(pcd2)
+        # Load point clouds
+        pcd1 = self._load_fragment_pointcloud(frag1)
+        pcd2 = self._load_fragment_pointcloud(frag2)
         
-        # Find contact points
-        contact_mask1 = np.zeros(len(points1), dtype=bool)
-        contact_mask2 = np.zeros(len(points2), dtype=bool)
+        if pcd1 is None or pcd2 is None:
+            print(f"Failed to load point clouds for {frag1} or {frag2}")
+            return
         
-        # Check each point in pcd1
-        for i in range(len(points1)):
-            [k, idx, _] = pcd2_tree.search_radius_vector_3d(pcd1.points[i], self.contact_threshold)
-            if k > 0:
-                contact_mask1[i] = True
+        # Position fragments side by side for better viewing
+        bbox1 = pcd1.get_axis_aligned_bounding_box()
+        bbox2 = pcd2.get_axis_aligned_bounding_box()
         
-        # Check each point in pcd2
-        for i in range(len(points2)):
-            [k, idx, _] = pcd1_tree.search_radius_vector_3d(pcd2.points[i], self.contact_threshold)
-            if k > 0:
-                contact_mask2[i] = True
+        # Calculate separation distance
+        width1 = bbox1.max_bound[0] - bbox1.min_bound[0]
+        width2 = bbox2.max_bound[0] - bbox2.min_bound[0]
+        separation = max(width1, width2) * 1.5
         
-        logger.info(f"Contact points: {np.sum(contact_mask1)} in {frag1_name}, "
-                   f"{np.sum(contact_mask2)} in {frag2_name}")
+        # Move second fragment to the right
+        translation = np.array([separation, 0, 0])
+        pcd2.translate(translation)
         
-        # Create contact point clouds with special colors
-        contact_pcd1 = None
-        contact_pcd2 = None
+        # Create visualization geometries
+        geometries = []
         
-        if np.any(contact_mask1):
-            contact_pcd1 = pcd1.select_by_index(np.where(contact_mask1)[0])
-            # Color contact region in yellow for fragment 1
-            contact_colors1 = np.tile([1.0, 1.0, 0.0], (len(contact_pcd1.points), 1))
-            contact_pcd1.colors = o3d.utility.Vector3dVector(contact_colors1)
+        # Add base point clouds (in gray)
+        pcd1_viz = o3d.geometry.PointCloud(pcd1)
+        pcd2_viz = o3d.geometry.PointCloud(pcd2)
         
-        if np.any(contact_mask2):
-            contact_pcd2 = pcd2.select_by_index(np.where(contact_mask2)[0])
-            # Color contact region in cyan for fragment 2
-            contact_colors2 = np.tile([0.0, 1.0, 1.0], (len(contact_pcd2.points), 1))
-            contact_pcd2.colors = o3d.utility.Vector3dVector(contact_colors2)
+        # Color base clouds in light gray
+        pcd1_viz.paint_uniform_color([0.7, 0.7, 0.7])
+        pcd2_viz.paint_uniform_color([0.6, 0.6, 0.6])
         
-        return contact_pcd1, contact_pcd2
-    
-    def _create_cluster_spheres(self, frag1_name: str, frag2_name: str, 
-                               show_gt_only: bool = True) -> List:
-        """Create spheres to visualize cluster positions."""
-        spheres = []
+        geometries.extend([pcd1_viz, pcd2_viz])
         
-        if not self.assembly_data:
-            return spheres
+        # Highlight matched clusters
+        colors = self._generate_match_colors(len(matches))
         
-        # Get cluster positions
-        cluster_positions = self._get_cluster_positions()
-        
-        # Find matches for this fragment pair
-        for i in range(len(self.assembly_data['cluster_id_1'])):
-            if (self.assembly_data['fragment_1'][i] == frag1_name and 
-                self.assembly_data['fragment_2'][i] == frag2_name):
-                
-                is_gt = self.assembly_data['is_ground_truth'][i]
-                
-                if show_gt_only and not is_gt:
-                    continue
-                
-                # Get cluster IDs
-                c1_id = self.assembly_data['cluster_id_1'][i]
-                c2_id = self.assembly_data['cluster_id_2'][i]
-                
-                # Create spheres at cluster positions
-                if c1_id in cluster_positions:
-                    pos1 = cluster_positions[c1_id]['world_pos']
-                    sphere1 = o3d.geometry.TriangleMesh.create_sphere(radius=5.0)
-                    sphere1.translate(pos1)
-                    
-                    # Color based on match type
-                    if is_gt:
-                        sphere1.paint_uniform_color([1.0, 0.0, 1.0])  # Magenta for GT
-                    else:
-                        sphere1.paint_uniform_color([0.5, 0.5, 0.5])  # Gray for non-GT
-                    
-                    spheres.append(sphere1)
-                
-                if c2_id in cluster_positions:
-                    pos2 = cluster_positions[c2_id]['world_pos']
-                    sphere2 = o3d.geometry.TriangleMesh.create_sphere(radius=5.0)
-                    sphere2.translate(pos2)
-                    
-                    if is_gt:
-                        sphere2.paint_uniform_color([1.0, 0.0, 1.0])  # Magenta for GT
-                    else:
-                        sphere2.paint_uniform_color([0.5, 0.5, 0.5])  # Gray for non-GT
-                    
-                    spheres.append(sphere2)
-                
-                # Draw line between matching clusters
-                if c1_id in cluster_positions and c2_id in cluster_positions:
-                    if is_gt:
-                        line_points = [pos1, pos2]
-                        line = o3d.geometry.LineSet()
-                        line.points = o3d.utility.Vector3dVector(line_points)
-                        line.lines = o3d.utility.Vector2iVector([[0, 1]])
-                        line.colors = o3d.utility.Vector3dVector([[1.0, 0.0, 1.0]])  # Magenta
-                        spheres.append(line)
-        
-        logger.info(f"Created {len(spheres)} cluster visualizations")
-        return spheres
-    
-    def _get_cluster_positions(self) -> Dict:
-        """Get world positions of all clusters matching the assembly script logic."""
-        cluster_positions = {}
-        
-        # Use the organized clusters by fragment
-        for frag_name, clusters in self.clusters_by_fragment.items():
-            if frag_name not in self.ground_truth['fragments']:
-                continue
-                
-            transform = np.array(self.ground_truth['fragments'][frag_name]['transform_matrix'])
+        for i, match in enumerate(matches):
+            color = colors[i]
             
-            for cluster in clusters:
-                # Transform to world coordinates
-                bary_homo = np.append(cluster['barycenter'], 1.0)
-                world_pos = (transform @ bary_homo)[:3]
-                
-                cluster_positions[cluster['cluster_id']] = {
-                    'fragment': frag_name,
-                    'local_pos': cluster['barycenter'],
-                    'world_pos': world_pos,
-                    'scale': cluster['scale']
-                }
+            # Create cluster point clouds
+            cluster_pcd1 = self._create_cluster_pointcloud(frag1, match, scale, 1, color)
+            cluster_pcd2 = self._create_cluster_pointcloud(frag2, match, scale, 2, color, translation)
+            
+            if cluster_pcd1 is not None:
+                geometries.append(cluster_pcd1)
+            if cluster_pcd2 is not None:
+                geometries.append(cluster_pcd2)
+            
+            # Add cluster centers as spheres
+            center1 = np.array(match['cluster_center_1'])
+            center2 = np.array(match['cluster_center_2']) + translation
+            
+            sphere1 = o3d.geometry.TriangleMesh.create_sphere(radius=2.0)
+            sphere1.translate(center1)
+            sphere1.paint_uniform_color(color)
+            
+            sphere2 = o3d.geometry.TriangleMesh.create_sphere(radius=2.0)
+            sphere2.translate(center2)
+            sphere2.paint_uniform_color(color)
+            
+            geometries.extend([sphere1, sphere2])
+            
+            # Add connecting line between cluster centers
+            line_points = [center1, center2]
+            line_lines = [[0, 1]]
+            line_set = o3d.geometry.LineSet()
+            line_set.points = o3d.utility.Vector3dVector(line_points)
+            line_set.lines = o3d.utility.Vector2iVector(line_lines)
+            line_set.paint_uniform_color(color)
+            
+            geometries.append(line_set)
         
-        return cluster_positions
-    
-    def _visualize_geometries(self, geometries: List, window_name: str = "3D Visualization"):
-        """Visualize geometries with proper settings."""
-        # Use the simpler draw_geometries function which is more compatible
+        # Add fragment labels
+        self._add_fragment_labels(geometries, frag1, frag2, bbox1, bbox2, translation)
+        
+        # Launch visualization
+        window_title = (f"GT Cluster Matches: {frag1} ↔ {frag2} "
+                       f"({scale.upper()} scale, {len(matches)} matches)")
+        
+        print(f"\nLaunching visualization...")
+        print(f"Controls:")
+        print(f"  - Mouse: Rotate, zoom, pan")
+        print(f"  - R: Reset view")
+        print(f"  - Q/ESC: Close")
+        
         o3d.visualization.draw_geometries(
             geometries,
-            window_name=window_name,
-            width=1200,
-            height=800,
-            left=50,
-            top=50,
-            point_show_normal=False
+            window_name=window_title,
+            width=1400,
+            height=800
         )
     
-    def visualize_all_contacts(self, save_images: bool = False):
-        """Visualize all contact pairs sequentially."""
-        for i, (frag1, frag2) in enumerate(self.contact_pairs):
-            print(f"\nVisualizing pair {i+1}/{len(self.contact_pairs)}: {frag1} <-> {frag2}")
-            self.visualize_contact_pair(frag1, frag2)
-            
-            if save_images:
-                # TODO: Implement image saving
-                pass
+    def _load_fragment_pointcloud(self, fragment_name: str) -> Optional[o3d.geometry.PointCloud]:
+        """Load point cloud for a fragment."""
+        ply_file = self.data_dir / f"{fragment_name}.ply"
+        
+        if not ply_file.exists():
+            # Try alternative location
+            ply_file = Path(f"Ground_Truth/artifact_1/{fragment_name}.ply")
+        
+        if ply_file.exists():
+            return o3d.io.read_point_cloud(str(ply_file))
+        else:
+            logger.error(f"Point cloud not found: {fragment_name}.ply")
+            return None
     
-    def create_summary_visualization(self):
-        """Create a summary visualization showing all contacts."""
-        logger.info("Creating summary visualization...")
+    def _create_cluster_pointcloud(self, fragment_name: str, match: Dict, 
+                                 scale: str, cluster_num: int, color: List[float],
+                                 translation: np.ndarray = None) -> Optional[o3d.geometry.PointCloud]:
+        """Create point cloud for a specific cluster."""
         
-        # Load all fragments in world coordinates
-        all_pcds = []
-        fragment_colors = {}
-        color_palette = plt.cm.tab20(np.linspace(0, 1, 20))
+        # Get cluster info
+        if cluster_num == 1:
+            local_id = match['local_id_1']
+        else:
+            local_id = match['local_id_2']
         
-        for i, frag_name in enumerate(sorted(self.segment_data.keys())):
-            pcd = self._load_fragment_pcd(frag_name)
-            if pcd is not None:
-                pcd_world = self._transform_to_world(pcd, frag_name)
-                
-                # Assign unique color
-                color = color_palette[i % 20][:3]
-                fragment_colors[frag_name] = color
-                self._color_fragment_base(pcd_world, color)
-                
-                all_pcds.append(pcd_world)
+        # Get cluster from hierarchical data
+        fragment_clusters = self.cluster_data.get(fragment_name, {})
+        scale_clusters = fragment_clusters.get(scale, [])
         
-        # Merge all point clouds
-        if all_pcds:
-            merged_pcd = all_pcds[0]
-            for pcd in all_pcds[1:]:
-                merged_pcd += pcd
+        if local_id >= len(scale_clusters):
+            logger.warning(f"Cluster {local_id} not found in {fragment_name} {scale}")
+            return None
+        
+        cluster = scale_clusters[local_id]
+        
+        # Get point indices
+        if isinstance(cluster, dict):
+            point_indices = cluster.get('original_point_indices', cluster.get('point_indices', []))
+        else:
+            point_indices = getattr(cluster, 'original_point_indices', 
+                                  getattr(cluster, 'point_indices', []))
+        
+        if not point_indices:
+            return None
+        
+        # Load full point cloud
+        pcd_full = self._load_fragment_pointcloud(fragment_name)
+        if pcd_full is None:
+            return None
+        
+        # Extract cluster points
+        all_points = np.asarray(pcd_full.points)
+        
+        # Handle point indices safely
+        valid_indices = [idx for idx in point_indices if 0 <= idx < len(all_points)]
+        
+        if not valid_indices:
+            return None
+        
+        cluster_points = all_points[valid_indices]
+        
+        # Create cluster point cloud
+        cluster_pcd = o3d.geometry.PointCloud()
+        cluster_pcd.points = o3d.utility.Vector3dVector(cluster_points)
+        cluster_pcd.paint_uniform_color(color)
+        
+        # Apply translation if needed
+        if translation is not None:
+            cluster_pcd.translate(translation)
+        
+        return cluster_pcd
+    
+    def _generate_match_colors(self, n_matches: int) -> List[List[float]]:
+        """Generate distinct colors for matches."""
+        if n_matches <= 10:
+            # Predefined colors for better distinction
+            base_colors = [
+                [1.0, 0.0, 0.0],  # Red
+                [0.0, 1.0, 0.0],  # Green
+                [0.0, 0.0, 1.0],  # Blue
+                [1.0, 1.0, 0.0],  # Yellow
+                [1.0, 0.0, 1.0],  # Magenta
+                [0.0, 1.0, 1.0],  # Cyan
+                [1.0, 0.5, 0.0],  # Orange
+                [0.5, 0.0, 1.0],  # Purple
+                [0.0, 0.5, 0.0],  # Dark Green
+                [0.5, 0.5, 0.0],  # Olive
+            ]
+            return base_colors[:n_matches]
+        else:
+            # Generate colors using HSV space for many matches
+            colors = []
+            for i in range(n_matches):
+                hue = (i * 360 / n_matches) % 360
+                # Convert HSV to RGB (simplified)
+                import colorsys
+                rgb = colorsys.hsv_to_rgb(hue/360, 0.8, 0.9)
+                colors.append(list(rgb))
+            return colors
+    
+    def _add_fragment_labels(self, geometries: List, frag1: str, frag2: str,
+                           bbox1, bbox2, translation: np.ndarray):
+        """Add text labels for fragments (simplified as coordinate frames)."""
+        
+        # Add coordinate frames to indicate fragment centers
+        frame_size = 10.0
+        
+        # Frame for fragment 1
+        center1 = bbox1.get_center()
+        frame1 = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size)
+        frame1.translate(center1)
+        geometries.append(frame1)
+        
+        # Frame for fragment 2
+        center2 = bbox2.get_center() + translation
+        frame2 = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size)
+        frame2.translate(center2)
+        geometries.append(frame2)
+    
+    def interactive_viewer(self):
+        """Interactive command-line interface for viewing matches."""
+        
+        while True:
+            print("\n" + "="*70)
+            print("INTERACTIVE GT CLUSTER MATCH VIEWER")
+            print("="*70)
+            print("1. List all contact pairs")
+            print("2. Visualize specific pair")
+            print("3. Quick visualization (pair, scale, top N)")
+            print("4. Exit")
             
-            # Add coordinate frame
-            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=100.0)
+            try:
+                choice = input("\nSelect option (1-4): ").strip()
+                
+                if choice == "1":
+                    self.list_contact_pairs()
+                
+                elif choice == "2":
+                    self._interactive_pair_selection()
+                
+                elif choice == "3":
+                    self._quick_visualization()
+                
+                elif choice == "4":
+                    print("Goodbye!")
+                    break
+                
+                else:
+                    print("Invalid choice. Please select 1-4.")
+                    
+            except KeyboardInterrupt:
+                print("\nGoodbye!")
+                break
+            except Exception as e:
+                print(f"Error: {e}")
+    
+    def _interactive_pair_selection(self):
+        """Interactive pair selection with detailed options."""
+        
+        self.list_contact_pairs()
+        
+        try:
+            pair_idx = int(input(f"\nSelect pair (1-{len(self.contact_pairs)}): "))
+            scale = input("Select scale (1k/5k/10k) [default: 1k]: ").strip() or "1k"
+            top_n = int(input("Number of top matches to show [default: 5]: ") or "5")
+            min_conf = float(input("Minimum confidence [default: 0.0]: ") or "0.0")
+            show_all = input("Show all matches? (y/n) [default: n]: ").strip().lower() == 'y'
             
-            self._visualize_geometries([merged_pcd, coord_frame], "All Fragments Assembly")
+            self.visualize_pair_matches(pair_idx, scale, top_n, show_all, min_conf)
+            
+        except ValueError:
+            print("Invalid input. Please enter numbers where required.")
+        except Exception as e:
+            print(f"Error: {e}")
+    
+    def _quick_visualization(self):
+        """Quick visualization with minimal input."""
+        try:
+            params = input("\nEnter: pair_index scale top_n (e.g., '1 1k 5'): ").strip().split()
+            
+            if len(params) >= 1:
+                pair_idx = int(params[0])
+                scale = params[1] if len(params) >= 2 else "1k"
+                top_n = int(params[2]) if len(params) >= 3 else 5
+                
+                self.visualize_pair_matches(pair_idx, scale, top_n)
+            else:
+                print("Invalid input format")
+                
+        except (ValueError, IndexError):
+            print("Invalid input. Use format: pair_index scale top_n")
+        except Exception as e:
+            print(f"Error: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize contact regions between fragments")
-    parser.add_argument("--ply_dir", default="Ground_Truth/artifact_1",
-                       help="Directory containing PLY files")
-    parser.add_argument("--segments", default="output/segmented_fragments.pkl",
-                       help="Path to segmented fragments file")
-    parser.add_argument("--clusters", default="output/feature_clusters_fixed.pkl",
-                       help="Path to cluster file")
-    parser.add_argument("--ground_truth", default="Ground_Truth/blender/ground_truth_assembly.json",
-                       help="Path to ground truth file")
-    parser.add_argument("--assembly", default="output/cluster_assembly_priors_improved.h5",
-                       help="Path to assembly results")
-    parser.add_argument("--list", action="store_true",
-                       help="List all contact pairs")
-    parser.add_argument("--pair", nargs=2, metavar=('FRAG1', 'FRAG2'),
-                       help="Visualize specific fragment pair")
-    parser.add_argument("--all", action="store_true",
-                       help="Visualize all contact pairs")
-    parser.add_argument("--summary", action="store_true",
-                       help="Show summary visualization")
-    parser.add_argument("--no-clusters", action="store_true",
-                       help="Don't show cluster spheres")
-    parser.add_argument("--debug", action="store_true",
-                       help="Show debug information")
+    """Main function with command line interface."""
+    parser = argparse.ArgumentParser(description="Visualize Ground Truth Cluster Matches")
+    parser.add_argument("--gt-file", default="Ground_Truth/multi_scale_cluster_ground_truth.json",
+                       help="Path to ground truth JSON file")
+    parser.add_argument("--clusters", default="output/feature_clusters.pkl",
+                       help="Path to cluster data file")
+    parser.add_argument("--data-dir", default="Ground_Truth/reconstructed/artifact_1",
+                       help="Directory with PLY files")
+    parser.add_argument("--pair", type=int, default=None,
+                       help="Fragment pair index to visualize")
+    parser.add_argument("--scale", default="1k", choices=["1k", "5k", "10k"],
+                       help="Cluster scale to visualize")
+    parser.add_argument("--top", type=int, default=5,
+                       help="Number of top matches to show")
+    parser.add_argument("--min-confidence", type=float, default=0.0,
+                       help="Minimum confidence threshold")
+    parser.add_argument("--list-pairs", action="store_true",
+                       help="Just list available pairs and exit")
+    parser.add_argument("--interactive", action="store_true", default=True,
+                       help="Launch interactive viewer")
     
     args = parser.parse_args()
     
-    # Create visualizer
-    visualizer = ContactRegionVisualizer(
-        ply_dir=args.ply_dir,
-        segments_file=args.segments,
-        clusters_file=args.clusters,
-        ground_truth_file=args.ground_truth,
-        assembly_file=args.assembly
-    )
-    
-    # Debug mode
-    if args.debug:
-        visualizer.debug_cluster_mapping()
-        return
-    
-    # Execute requested action
-    if args.list:
-        visualizer.list_contact_pairs()
-    elif args.pair:
-        visualizer.visualize_contact_pair(
-            args.pair[0], args.pair[1], 
-            show_clusters=not args.no_clusters
+    try:
+        # Initialize visualizer
+        visualizer = GTClusterVisualizer(
+            gt_file=args.gt_file,
+            clusters_file=args.clusters,
+            data_dir=args.data_dir
         )
-    elif args.all:
-        visualizer.visualize_all_contacts()
-    elif args.summary:
-        visualizer.create_summary_visualization()
-    else:
-        # Default: list pairs and show instructions
-        visualizer.list_contact_pairs()
-        print("\nUsage examples:")
-        print("  Visualize specific pair:  python visualize_contacts.py --pair frag_1 frag_2")
-        print("  Show all pairs:          python visualize_contacts.py --all")
-        print("  Summary view:            python visualize_contacts.py --summary")
-        print("  Without clusters:        python visualize_contacts.py --pair frag_1 frag_2 --no-clusters")
-        print("  Debug mapping:           python visualize_contacts.py --debug")
-        print("\nControls:")
-        print("  P - Toggle point size")
-        print("  Mouse - Rotate/zoom/pan")
-        print("  Q/ESC - Close window")
+        
+        if args.list_pairs:
+            # Just list pairs
+            visualizer.list_contact_pairs()
+            
+        elif args.pair is not None:
+            # Direct visualization
+            visualizer.visualize_pair_matches(
+                pair_index=args.pair,
+                scale=args.scale,
+                top_n=args.top,
+                min_confidence=args.min_confidence
+            )
+            
+        else:
+            # Interactive mode
+            visualizer.interactive_viewer()
+            
+    except Exception as e:
+        logger.error(f"Visualization failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
