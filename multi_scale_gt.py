@@ -67,16 +67,16 @@ class MultiScaleClusterGTExtractor:
                  clusters_file: str = "output/feature_clusters.pkl",
                  segments_file: str = "output/segmented_fragments.pkl",
                  output_dir: str = "Ground_Truth",
-                 contact_threshold: float = 3.0,
-                 cluster_contact_threshold: float = 15.0,
+                 contact_threshold: float = 2.0,  # Point-to-point contact distance
+                 max_cluster_distance: float = 10.0,  # Max distance between cluster barycenters
                  scales: List[str] = ["1k", "5k", "10k"]):
         
         self.positioned_dir = Path(positioned_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
-        self.contact_threshold = contact_threshold  # For point-level contacts
-        self.cluster_contact_threshold = cluster_contact_threshold  # For cluster-level contacts
+        self.contact_threshold = contact_threshold  # For actual point-to-point contacts (2mm)
+        self.max_cluster_distance = max_cluster_distance  # Max barycenter distance for consideration
         self.scales = scales
         
         # Load cluster and segment data
@@ -345,7 +345,22 @@ class MultiScaleClusterGTExtractor:
         cluster_points2 = self.fragment_points[frag2].get(f'cluster_points_{scale}', {})
         
         if not cluster_points1 or not cluster_points2:
-            return matches
+            def _check_cluster_proximity(self, points1: np.ndarray, points2: np.ndarray) -> bool:
+                """Check if two clusters have overlapping bounding boxes with gap tolerance."""
+                # Get bounding boxes
+                min1, max1 = np.min(points1, axis=0), np.max(points1, axis=0)
+                min2, max2 = np.min(points2, axis=0), np.max(points2, axis=0)
+        
+        # Add gap tolerance - fragments may not perfectly align
+        gap_tolerance = 1.5  # mm - accounts for small gaps in break surfaces
+        
+        # Check if bounding boxes overlap with gap tolerance
+        for dim in range(3):
+            # If the gap between bounding boxes is larger than tolerance, no contact
+            if (min2[dim] - max1[dim]) > gap_tolerance or (min1[dim] - max2[dim]) > gap_tolerance:
+                return False
+        
+        return True  # Bounding boxes are close enough to potentially have contact
         
         # For each cluster in fragment 1
         for local_id1, cluster_data1 in cluster_points1.items():
@@ -361,7 +376,12 @@ class MultiScaleClusterGTExtractor:
                 
                 # Quick distance check between cluster centers
                 center_dist = np.linalg.norm(center1 - center2)
-                if center_dist > self.cluster_contact_threshold * 2:
+                if center_dist > self.max_cluster_distance:
+                    continue
+                
+                # Better pre-check: Use bounding box overlap + margin
+                # If bounding boxes don't overlap with contact_threshold margin, skip
+                if not self._check_cluster_proximity(points1, points2):
                     continue
                 
                 # Detailed contact analysis with overlap ratios
@@ -374,6 +394,26 @@ class MultiScaleClusterGTExtractor:
                     matches.append(contact_info)
         
         return matches
+    
+    def _check_cluster_proximity(self, points1: np.ndarray, points2: np.ndarray) -> bool:
+        """Check if two clusters have overlapping bounding boxes with contact margin."""
+        # Get bounding boxes
+        min1, max1 = np.min(points1, axis=0), np.max(points1, axis=0)
+        min2, max2 = np.min(points2, axis=0), np.max(points2, axis=0)
+        
+        # Expand bounding boxes by contact threshold
+        margin = self.contact_threshold
+        min1_expanded = min1 - margin
+        max1_expanded = max1 + margin
+        min2_expanded = min2 - margin  
+        max2_expanded = max2 + margin
+        
+        # Check if expanded bounding boxes overlap
+        for dim in range(3):
+            if max1_expanded[dim] < min2[dim] or max2_expanded[dim] < min1[dim]:
+                return False
+        
+        return True
     
     def _analyze_cluster_overlap_contact(self, cluster_data1: Dict, cluster_data2: Dict,
                                        frag1: str, frag2: str, scale: str) -> Optional[ScaleClusterGroundTruth]:
@@ -602,7 +642,7 @@ class MultiScaleClusterGTExtractor:
             'extraction_info': {
                 'source_directory': str(self.positioned_dir),
                 'contact_threshold': self.contact_threshold,
-                'cluster_contact_threshold': self.cluster_contact_threshold,
+                'max_cluster_distance': self.max_cluster_distance,
                 'scales_processed': self.scales,
                 'extraction_date': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'total_matches_by_scale': {
@@ -808,10 +848,10 @@ def main():
                        help="Path to segmentation file")
     parser.add_argument("--output-dir", default="Ground_Truth",
                        help="Output directory")
-    parser.add_argument("--contact-threshold", type=float, default=3.0,
-                       help="Point contact threshold in mm")
-    parser.add_argument("--cluster-threshold", type=float, default=15.0,
-                       help="Cluster contact threshold in mm")
+    parser.add_argument("--contact-threshold", type=float, default=2.0,
+                       help="Point-to-point contact threshold in mm")
+    parser.add_argument("--max-cluster-distance", type=float, default=20.0,
+                       help="Maximum distance between cluster centers to consider in mm")
     parser.add_argument("--scales", nargs='+', default=["1k", "5k", "10k"],
                        help="Scales to process")
     parser.add_argument("--visualize", type=int, default=0,
@@ -828,7 +868,7 @@ def main():
         segments_file=args.segments,
         output_dir=args.output_dir,
         contact_threshold=args.contact_threshold,
-        cluster_contact_threshold=args.cluster_threshold,
+        max_cluster_distance=args.max_cluster_distance,
         scales=args.scales
     )
     
