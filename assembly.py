@@ -278,26 +278,38 @@ class UnifiedAssemblyExtractor:
         
         return pair_matches
     
-    def _evaluate_cluster_similarity(self, cluster1: Dict, cluster2: Dict, 
+    def _get_cluster_attribute(self, cluster, attr_name, default_value):
+        """Helper method to get attribute from either dict or dataclass."""
+        if hasattr(cluster, attr_name):
+            # It's a dataclass
+            return getattr(cluster, attr_name)
+        elif isinstance(cluster, dict) and attr_name in cluster:
+            # It's a dictionary
+            return cluster[attr_name]
+        else:
+            # Return default
+            return default_value
+    
+    def _evaluate_cluster_similarity(self, cluster1, cluster2, 
                                    frag1: str, frag2: str, scale: str, 
                                    local_id1: int, local_id2: int) -> MultiScaleClusterMatch:
         """Calculate similarity between two clusters WITHOUT distance threshold."""
         
-        # Extract cluster properties
-        barycenter1 = np.array(cluster1.get('barycenter', [0, 0, 0]))
-        barycenter2 = np.array(cluster2.get('barycenter', [0, 0, 0]))
+        # Extract cluster properties using helper method
+        barycenter1 = np.array(self._get_cluster_attribute(cluster1, 'barycenter', [0, 0, 0]))
+        barycenter2 = np.array(self._get_cluster_attribute(cluster2, 'barycenter', [0, 0, 0]))
         
-        axes1 = np.array(cluster1.get('principal_axes', np.eye(3)))
-        axes2 = np.array(cluster2.get('principal_axes', np.eye(3)))
+        axes1 = np.array(self._get_cluster_attribute(cluster1, 'principal_axes', np.eye(3)))
+        axes2 = np.array(self._get_cluster_attribute(cluster2, 'principal_axes', np.eye(3)))
         
-        eigenvals1 = np.array(cluster1.get('eigenvalues', [1, 1, 1]))
-        eigenvals2 = np.array(cluster2.get('eigenvalues', [1, 1, 1]))
+        eigenvals1 = np.array(self._get_cluster_attribute(cluster1, 'eigenvalues', [1, 1, 1]))
+        eigenvals2 = np.array(self._get_cluster_attribute(cluster2, 'eigenvalues', [1, 1, 1]))
         
-        size_sig1 = cluster1.get('size_signature', 1.0)
-        size_sig2 = cluster2.get('size_signature', 1.0)
+        size_sig1 = self._get_cluster_attribute(cluster1, 'size_signature', 1.0)
+        size_sig2 = self._get_cluster_attribute(cluster2, 'size_signature', 1.0)
         
-        aniso_sig1 = cluster1.get('anisotropy_signature', 1.0)
-        aniso_sig2 = cluster2.get('anisotropy_signature', 1.0)
+        aniso_sig1 = self._get_cluster_attribute(cluster1, 'anisotropy_signature', 1.0)
+        aniso_sig2 = self._get_cluster_attribute(cluster2, 'anisotropy_signature', 1.0)
         
         # 1. Normal Similarity (most important for assembly)
         normal1 = axes1[:, 0]  # First principal axis
@@ -324,10 +336,10 @@ class UnifiedAssemblyExtractor:
         # 5. Combined Confidence (weighted combination)
         # Emphasize normal similarity for assembly
         weights = {
-            'normal': 0.4,      # Most important for assembly
-            'size': 0.25,        # Somewhat important
-            'shape': 0.3,       # Somewhat important  
-            'spatial': 0.5     # Least important (no threshold)
+            'normal': 0.5,      # Most important for assembly
+            'size': 0.2,        # Somewhat important
+            'shape': 0.2,       # Somewhat important  
+            'spatial': 0.1      # Least important (no threshold)
         }
         
         match_confidence = (
@@ -338,8 +350,8 @@ class UnifiedAssemblyExtractor:
         )
         
         # Generate cluster IDs
-        cluster_id1 = cluster1.get('cluster_id', f"{frag1}_c{scale}_{local_id1+1:03d}")
-        cluster_id2 = cluster2.get('cluster_id', f"{frag2}_c{scale}_{local_id2+1:03d}")
+        cluster_id1 = self._get_cluster_attribute(cluster1, 'cluster_id', f"{frag1}_c{scale}_{local_id1+1:03d}")
+        cluster_id2 = self._get_cluster_attribute(cluster2, 'cluster_id', f"{frag2}_c{scale}_{local_id2+1:03d}")
         
         return MultiScaleClusterMatch(
             scale=scale,
@@ -439,7 +451,7 @@ class UnifiedAssemblyExtractor:
         for frag_name, scales_dict in self.hierarchical_clusters.items():
             for scale_name, clusters in scales_dict.items():
                 for i, cluster in enumerate(clusters):
-                    cluster_id = cluster.get('cluster_id', f"{frag_name}_c{scale_name}_{i+1:03d}")
+                    cluster_id = self._get_cluster_attribute(cluster, 'cluster_id', f"{frag_name}_c{scale_name}_{i+1:03d}")
                     
                     node_id = f"{frag_name}_{scale_name}_{i}"
                     G.add_node(node_id,
@@ -447,8 +459,8 @@ class UnifiedAssemblyExtractor:
                               scale=scale_name,
                               local_id=i,
                               cluster_id=cluster_id,
-                              size_signature=cluster.get('size_signature', 0),
-                              anisotropy_signature=cluster.get('anisotropy_signature', 0))
+                              size_signature=self._get_cluster_attribute(cluster, 'size_signature', 0),
+                              anisotropy_signature=self._get_cluster_attribute(cluster, 'anisotropy_signature', 0))
         
         # Add edges from matches
         edge_count = 0
