@@ -519,10 +519,10 @@ class UnifiedAssemblyExtractor:
         return count // 2
     
     def _print_precision_analysis(self, all_matches_by_scale: Dict):
-        """Print precision analysis: True Positives vs False Positives per pair."""
-        print("\n" + "="*80)
-        print("PRECISION ANALYSIS: TP vs FP vs GT (with Recall)")
-        print("="*80)
+        """Print detailed analysis per fragment pair with confidence filtering."""
+        print("\n" + "="*100)
+        print("FRAGMENT PAIR ANALYSIS: GT Matches with Confidence Details")
+        print("="*100)
         
         for scale in self.scales:
             matches = all_matches_by_scale.get(scale, [])
@@ -530,54 +530,77 @@ class UnifiedAssemblyExtractor:
                 continue
                 
             print(f"\n{scale.upper()} SCALE:")
-            print("-" * 50)
+            print("-" * 80)
             
             # Group matches by fragment pair (normalize pair order)
-            pair_stats = {}
+            pair_matches = {}
             for match in matches:
                 # Always put smaller fragment name first to avoid duplicates
                 frag_a, frag_b = sorted([match.fragment_1, match.fragment_2])
                 pair_key = (frag_a, frag_b)
-                if pair_key not in pair_stats:
-                    pair_stats[pair_key] = {'total': 0, 'gt': 0}
-                pair_stats[pair_key]['total'] += 1
-                if match.is_ground_truth:
-                    pair_stats[pair_key]['gt'] += 1
+                if pair_key not in pair_matches:
+                    pair_matches[pair_key] = []
+                pair_matches[pair_key].append(match)
             
-            # Calculate overall metrics
-            total_predicted = len(matches)
-            total_true_positives = sum(1 for m in matches if m.is_ground_truth)
-            total_false_positives = total_predicted - total_true_positives
-            
-            # Count total GT matches available for this scale
-            total_gt_available = len(self.gt_matches_by_scale.get(scale, {})) // 2  # Divide by 2 for bidirectional
-            
-            print(f"OVERALL: {total_predicted} predicted, {total_true_positives} TP, {total_false_positives} FP")
-            print(f"GT AVAILABLE: {total_gt_available} total GT matches in this scale")
-            if total_predicted > 0:
-                precision = total_true_positives / total_predicted
-                print(f"PRECISION: {precision:.3f} ({precision*100:.1f}%)")
-            if total_gt_available > 0:
-                recall = total_true_positives / total_gt_available
-                print(f"RECALL: {recall:.3f} ({recall*100:.1f}%)")
-            
-            print(f"\nPER FRAGMENT PAIR:")
-            print("Format: Pair → Predicted | TP | FP | GT_Available | Precision | Recall")
-            print("-" * 80)
-            
-            for (frag1, frag2), stats in sorted(pair_stats.items()):
-                total = stats['total']
-                tp = stats['gt']
-                fp = total - tp
-                precision = tp / total if total > 0 else 0
+            # Process each fragment pair
+            for (frag1, frag2), pair_match_list in sorted(pair_matches.items()):
                 
                 # Count GT matches available for this specific pair
                 gt_available = self._count_gt_matches_for_pair(frag1, frag2, scale)
-                recall = tp / gt_available if gt_available > 0 else 0
                 
-                print(f"  {frag1} ↔ {frag2}: {total:4d} | {tp:3d} | {fp:4d} | {gt_available:3d} | {precision:.3f} | {recall:.3f}")
+                # Filter matches with confidence >= 0.5
+                high_confidence_matches = [m for m in pair_match_list if m.match_confidence >= 0.5]
+                gt_matches_found = [m for m in high_confidence_matches if m.is_ground_truth]
+                
+                if gt_available == 0 and len(high_confidence_matches) == 0:
+                    continue  # Skip pairs with no GT and no high-confidence matches
+                
+                print(f"\n{frag1} ↔ {frag2}:")
+                print(f"  GT Available: {gt_available}")
+                print(f"  High Confidence (≥50%) Predicted: {len(high_confidence_matches)}")
+                print(f"  GT Matches Found: {len(gt_matches_found)}")
+                
+                if gt_available > 0:
+                    recall = len(gt_matches_found) / gt_available
+                    print(f"  Recall: {recall:.3f} ({recall*100:.1f}%)")
+                
+                # Show GT matches with details
+                if gt_matches_found:
+                    print(f"  GT MATCHES FOUND (confidence ≥ 50%):")
+                    for i, match in enumerate(sorted(gt_matches_found, key=lambda m: m.match_confidence, reverse=True)):
+                        print(f"    {i+1}. {match.cluster_id_1} ↔ {match.cluster_id_2}")
+                        print(f"       Confidence: {match.match_confidence:.3f}")
+                        print(f"       Normal Sim: {match.normal_similarity:.3f}")
+                        print(f"       Size Sim: {match.size_similarity:.3f}")
+                        print(f"       GT Type: {match.gt_contact_type}")
+                        print(f"       GT Conf: {match.gt_confidence:.3f}")
+                
+                # Show top non-GT high confidence matches (potential false positives)
+                non_gt_high_conf = [m for m in high_confidence_matches if not m.is_ground_truth]
+                if non_gt_high_conf and len(non_gt_high_conf) <= 10:  # Only show if not too many
+                    print(f"  TOP NON-GT HIGH CONFIDENCE MATCHES:")
+                    for i, match in enumerate(sorted(non_gt_high_conf, key=lambda m: m.match_confidence, reverse=True)[:5]):
+                        print(f"    {i+1}. {match.cluster_id_1} ↔ {match.cluster_id_2}")
+                        print(f"       Confidence: {match.match_confidence:.3f}")
+                        print(f"       Normal Sim: {match.normal_similarity:.3f}")
+                
+                # Show missing GT matches (GT matches we didn't find with high confidence)
+                if gt_available > len(gt_matches_found):
+                    missing_count = gt_available - len(gt_matches_found)
+                    print(f"  MISSING GT MATCHES: {missing_count} (found with confidence < 50% or not found)")
+                    
+                    # Find GT matches with low confidence
+                    all_gt_matches_for_pair = [m for m in pair_match_list if m.is_ground_truth]
+                    low_conf_gt = [m for m in all_gt_matches_for_pair if m.match_confidence < 0.5]
+                    
+                    if low_conf_gt:
+                        print(f"    GT matches with low confidence:")
+                        for i, match in enumerate(sorted(low_conf_gt, key=lambda m: m.match_confidence, reverse=True)):
+                            print(f"      {i+1}. {match.cluster_id_1} ↔ {match.cluster_id_2}")
+                            print(f"         Confidence: {match.match_confidence:.3f}")
+                            print(f"         Normal Sim: {match.normal_similarity:.3f}")
         
-        print("\n" + "="*80)
+        print("\n" + "="*100)
     
     def _build_multi_scale_graph(self, all_matches_by_scale: Dict) -> nx.Graph:
         """Build assembly graph with multi-scale edges."""
@@ -825,11 +848,23 @@ def main():
         print(f"\nOVERALL SUMMARY:")
         print(f"Contact pairs: {len(extractor.contact_pairs)}")
         print(f"Total matches: {total_matches:,}")
-        print(f"True positives: {total_gt:,}")
-        print(f"False positives: {total_matches - total_gt:,}")
-        if total_matches > 0:
-            precision = total_gt / total_matches
-            print(f"Overall precision: {precision:.3f} ({precision*100:.1f}%)")
+        print(f"GT matches found: {total_gt:,}")
+        
+        # Count high confidence matches
+        high_conf_matches = 0
+        high_conf_gt = 0
+        for matches in all_matches_by_scale.values():
+            for match in matches:
+                if match.match_confidence >= 0.5:
+                    high_conf_matches += 1
+                    if match.is_ground_truth:
+                        high_conf_gt += 1
+        
+        print(f"High confidence (≥50%) matches: {high_conf_matches:,}")
+        print(f"High confidence GT matches: {high_conf_gt:,}")
+        if high_conf_matches > 0:
+            hc_precision = high_conf_gt / high_conf_matches
+            print(f"High confidence precision: {hc_precision:.3f} ({hc_precision*100:.1f}%)")
         
         print(f"\nResults saved to: {args.output_dir}")
         
