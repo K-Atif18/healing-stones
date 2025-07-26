@@ -317,7 +317,7 @@ class MultiScaleClusterGTExtractor:
         return contact_pairs
     
     def _check_fragment_contact(self, frag1: str, frag2: str) -> bool:
-        """Quick check if two fragments are in contact."""
+        """More thorough check if two fragments are in contact - using multiple random samples."""
         if frag1 not in self.fragment_points or frag2 not in self.fragment_points:
             return False
             
@@ -334,13 +334,27 @@ class MultiScaleClusterGTExtractor:
             if min2[dim] - self.contact_threshold > max1[dim]:
                 return False
         
-        # Sample check for efficiency
-        sample_size = min(1000, len(points1))
-        sample_indices = np.random.choice(len(points1), sample_size, replace=False)
-        sample_points = points1[sample_indices]
-        
+        # More thorough contact check - try multiple samples to avoid missing contacts
         tree2 = cKDTree(points2)
-        distances, _ = tree2.query(sample_points)
+        
+        # Try 3 different random samples to be more thorough
+        for trial in range(3):
+            sample_size = min(1000, len(points1))
+            sample_indices = np.random.choice(len(points1), sample_size, replace=False)
+            sample_points = points1[sample_indices]
+            
+            distances, _ = tree2.query(sample_points)
+            
+            if np.min(distances) < self.contact_threshold:
+                return True
+        
+        # If random sampling failed, try a systematic approach for edge cases
+        # Sample every 10th point for a more deterministic check
+        step_size = max(1, len(points1) // 500)  # Sample ~500 points systematically
+        systematic_indices = np.arange(0, len(points1), step_size)
+        systematic_points = points1[systematic_indices]
+        
+        distances, _ = tree2.query(systematic_points)
         
         return np.min(distances) < self.contact_threshold
     
@@ -836,9 +850,9 @@ def main():
                        help="Path to segmentation file")
     parser.add_argument("--output-dir", default="Ground_Truth",
                        help="Output directory")
-    parser.add_argument("--contact-threshold", type=float, default=2.0,
+    parser.add_argument("--contact-threshold", type=float, default=1.5,
                        help="Point-to-point contact threshold in mm")
-    parser.add_argument("--max-cluster-distance", type=float, default=20.0,
+    parser.add_argument("--max-cluster-distance", type=float, default=10.0,
                        help="Maximum distance between cluster centers to consider in mm")
     parser.add_argument("--scales", nargs='+', default=["1k", "5k", "10k"],
                        help="Scales to process")
