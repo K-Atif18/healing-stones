@@ -307,6 +307,13 @@ class MultiScaleClusterGTExtractor:
                     contact_pairs.append((frag1, frag2))
         
         logger.info(f"Found {len(contact_pairs)} fragment contact pairs")
+        
+        # PRINT THE CONTACT PAIRS
+        print(f"\nGT SCRIPT - CONTACT PAIRS FOUND ({len(contact_pairs)}):")
+        for i, (frag1, frag2) in enumerate(contact_pairs):
+            print(f"  {i+1}. {frag1} ↔ {frag2}")
+        print()
+        
         return contact_pairs
     
     def _check_fragment_contact(self, frag1: str, frag2: str) -> bool:
