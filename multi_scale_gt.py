@@ -3,6 +3,8 @@
 Multi-Scale Cluster-Level Ground Truth Extractor
 Works with unified clustering pipeline and handles partial overlapping contacts
 across different scales (1k, 5k, 10k)
+
+MODIFICATION: Improved fragment contact detection + radius-based cluster matching
 """
 
 import numpy as np
@@ -68,7 +70,7 @@ class MultiScaleClusterGTExtractor:
                  segments_file: str = "output/segmented_fragments.pkl",
                  output_dir: str = "Ground_Truth",
                  contact_threshold: float = 2.0,  # Point-to-point contact distance
-                 max_cluster_distance: float = 20.0,  # Max distance between cluster barycenters
+                 max_cluster_distance: float = 30.0,  # Max distance between cluster barycenters
                  scales: List[str] = ["1k", "5k", "10k"]):
         
         self.positioned_dir = Path(positioned_dir)
@@ -86,6 +88,7 @@ class MultiScaleClusterGTExtractor:
         self.fragments = {}
         self.fragment_points = {}
         self.cluster_gt_matches = {scale: [] for scale in self.scales}
+        self.contact_pairs = []  # Store contact pairs for JSON output
         
     def _load_unified_cluster_data(self, clusters_file: str, segments_file: str):
         """Load hierarchical cluster data from unified pipeline with fallback."""
@@ -175,15 +178,15 @@ class MultiScaleClusterGTExtractor:
         # Step 1: Load positioned fragments with cluster assignments
         self._load_positioned_fragments_with_clusters()
         
-        # Step 2: Find fragment-level contacts
-        contact_pairs = self._find_fragment_contacts()
+        # Step 2: Find fragment-level contacts and store them (IMPROVED VERSION)
+        self.contact_pairs = self._find_fragment_contacts_improved()
         
-        # Step 3: For each scale, find cluster-level matches
+        # Step 3: For each scale, find cluster-level matches using radius-based approach
         for scale in self.scales:
             logger.info(f"\nProcessing scale: {scale}")
             
-            for frag1, frag2 in tqdm(contact_pairs, desc=f"Finding {scale} cluster matches"):
-                cluster_matches = self._find_scale_cluster_matches(frag1, frag2, scale)
+            for frag1, frag2 in tqdm(self.contact_pairs, desc=f"Finding {scale} cluster matches"):
+                cluster_matches = self._find_scale_cluster_matches_proximity_based(frag1, frag2, scale)
                 self.cluster_gt_matches[scale].extend(cluster_matches)
             
             # Sort by confidence and mark primary contacts for this scale
@@ -192,7 +195,7 @@ class MultiScaleClusterGTExtractor:
             logger.info(f"Found {len(self.cluster_gt_matches[scale])} matches for scale {scale}")
         
         # Step 4: Compile and save enhanced ground truth
-        ground_truth = self._compile_multi_scale_ground_truth(contact_pairs)
+        ground_truth = self._compile_multi_scale_ground_truth()
         
         # Save results
         self._save_ground_truth(ground_truth)
@@ -290,9 +293,9 @@ class MultiScaleClusterGTExtractor:
             
             self.fragment_points[fragment_name] = fragment_cluster_data
     
-    def _find_fragment_contacts(self):
-        """Find which fragments are in contact."""
-        logger.info("Finding fragment contacts...")
+    def _find_fragment_contacts_improved(self):
+        """IMPROVED: Find which fragments are in contact using better detection from second script."""
+        logger.info("Finding fragment contacts (improved method)...")
         
         fragment_names = sorted(self.fragments.keys())
         contact_pairs = []
@@ -303,10 +306,11 @@ class MultiScaleClusterGTExtractor:
                 frag1 = fragment_names[i]
                 frag2 = fragment_names[j]
                 
-                if self._check_fragment_contact(frag1, frag2):
+                # Use improved contact detection
+                if self._check_fragment_contact_improved(frag1, frag2):
                     contact_pairs.append((frag1, frag2))
         
-        logger.info(f"Found {len(contact_pairs)} fragment contact pairs")
+        logger.info(f"Found {len(contact_pairs)} fragment contact pairs (improved method)")
         
         # PRINT THE CONTACT PAIRS
         print(f"\nGT SCRIPT - CONTACT PAIRS FOUND ({len(contact_pairs)}):")
@@ -316,8 +320,8 @@ class MultiScaleClusterGTExtractor:
         
         return contact_pairs
     
-    def _check_fragment_contact(self, frag1: str, frag2: str) -> bool:
-        """More thorough check if two fragments are in contact - using multiple random samples."""
+    def _check_fragment_contact_improved(self, frag1: str, frag2: str) -> bool:
+        """IMPROVED: More thorough check if two fragments are in contact - using multiple approaches from second script."""
         if frag1 not in self.fragment_points or frag2 not in self.fragment_points:
             return False
             
@@ -337,7 +341,7 @@ class MultiScaleClusterGTExtractor:
         # More thorough contact check - try multiple samples to avoid missing contacts
         tree2 = cKDTree(points2)
         
-        # Try 3 different random samples to be more thorough
+        # Method 1: Try 3 different random samples for robustness (from second script)
         for trial in range(3):
             sample_size = min(1000, len(points1))
             sample_indices = np.random.choice(len(points1), sample_size, replace=False)
@@ -348,18 +352,31 @@ class MultiScaleClusterGTExtractor:
             if np.min(distances) < self.contact_threshold:
                 return True
         
-        # If random sampling failed, try a systematic approach for edge cases
-        # Sample every 10th point for a more deterministic check
+        # Method 2: If random sampling failed, try a systematic approach for edge cases
+        # Sample every Nth point for a more deterministic check
         step_size = max(1, len(points1) // 500)  # Sample ~500 points systematically
         systematic_indices = np.arange(0, len(points1), step_size)
         systematic_points = points1[systematic_indices]
         
         distances, _ = tree2.query(systematic_points)
         
+        if np.min(distances) < self.contact_threshold:
+            return True
+        
+        # Method 3: Final check - try the reverse direction (points2 against points1)
+        # This catches cases where one fragment is much smaller than the other
+        tree1 = cKDTree(points1)
+        sample_size = min(1000, len(points2))
+        sample_indices = np.random.choice(len(points2), sample_size, replace=False)
+        sample_points = points2[sample_indices]
+        
+        distances, _ = tree1.query(sample_points)
+        
         return np.min(distances) < self.contact_threshold
     
-    def _find_scale_cluster_matches(self, frag1: str, frag2: str, scale: str) -> List[ScaleClusterGroundTruth]:
-        """Find cluster-level matches between two fragments at a specific scale."""
+
+    def _find_scale_cluster_matches_proximity_based(self, frag1: str, frag2: str, scale: str) -> List[ScaleClusterGroundTruth]:
+        """PROXIMITY-BASED: Find cluster matches using strict 2mm proximity."""
         matches = []
         
         cluster_points1 = self.fragment_points[frag1].get(f'cluster_points_{scale}', {})
@@ -368,11 +385,16 @@ class MultiScaleClusterGTExtractor:
         if not cluster_points1 or not cluster_points2:
             return matches
         
+        logger.debug(f"Proximity-based matching: {len(cluster_points1)} vs {len(cluster_points2)} clusters for {frag1}-{frag2} at {scale}")
+        
         # For each cluster in fragment 1
         for local_id1, cluster_data1 in cluster_points1.items():
             points1 = cluster_data1['points']
             center1 = cluster_data1['center']
             cluster_id1 = cluster_data1['cluster_id']
+            
+            # Build KD-tree for cluster 1 points
+            tree1 = cKDTree(points1)
             
             # Check against each cluster in fragment 2
             for local_id2, cluster_data2 in cluster_points2.items():
@@ -380,90 +402,117 @@ class MultiScaleClusterGTExtractor:
                 center2 = cluster_data2['center']
                 cluster_id2 = cluster_data2['cluster_id']
                 
-                # Quick distance check between cluster centers
+                # Quick center distance check - but more generous than before
                 center_dist = np.linalg.norm(center1 - center2)
-                if center_dist > self.max_cluster_distance:
+                max_reasonable_distance = 50.0  # mm - only to avoid obviously impossible pairs
+                if center_dist > max_reasonable_distance:
                     continue
                 
-                # Use the proximity check method
-                if not self._check_cluster_proximity(points1, points2):
-                    continue
-                
-                # Detailed contact analysis with overlap ratios
-                contact_info = self._analyze_cluster_overlap_contact(
-                    cluster_data1, cluster_data2, 
-                    frag1, frag2, scale
-                )
-                
-                if contact_info is not None:
-                    matches.append(contact_info)
+                # PRIMARY TEST: Check if ANY points from cluster2 are within 2mm of cluster1
+                # This is the key test - direct point-to-point proximity
+                if self._check_clusters_have_close_points(points1, points2):
+                    
+                    # If they have close points, do detailed analysis
+                    contact_info = self._analyze_close_clusters(
+                        cluster_data1, cluster_data2, 
+                        frag1, frag2, scale
+                    )
+                    
+                    if contact_info is not None:
+                        matches.append(contact_info)
+                        logger.debug(f"Proximity match: {cluster_id1} <-> {cluster_id2} "
+                                   f"(conf={contact_info.confidence:.3f})")
         
+        logger.info(f"Found {len(matches)} proximity matches for {frag1}-{frag2} at {scale}")
         return matches
-    
-    def _check_cluster_proximity(self, points1: np.ndarray, points2: np.ndarray) -> bool:
-        """Check if two clusters have overlapping bounding boxes with gap tolerance."""
-        # Get bounding boxes
-        min1, max1 = np.min(points1, axis=0), np.max(points1, axis=0)
-        min2, max2 = np.min(points2, axis=0), np.max(points2, axis=0)
+
+    def _check_clusters_have_close_points(self, points1: np.ndarray, points2: np.ndarray) -> bool:
+        """Check if any points from the two clusters are within contact_threshold of each other."""
+        # Build KD-tree for points1
+        tree1 = cKDTree(points1)
         
-        # Add gap tolerance - fragments may not perfectly align
-        gap_tolerance = 1.5  # mm - accounts for small gaps in break surfaces
+        # For efficiency, check a sample of points2 against tree1
+        max_check_points = min(500, len(points2))  # Don't check too many points for performance
         
-        # Check if bounding boxes overlap with gap tolerance
-        for dim in range(3):
-            # If the gap between bounding boxes is larger than tolerance, no contact
-            if (min2[dim] - max1[dim]) > gap_tolerance or (min1[dim] - max2[dim]) > gap_tolerance:
-                return False
+        if len(points2) > max_check_points:
+            # Sample points2 randomly
+            sample_indices = np.random.choice(len(points2), max_check_points, replace=False)
+            sample_points2 = points2[sample_indices]
+        else:
+            sample_points2 = points2
         
-        return True  # Bounding boxes are close enough to potentially have contact
-    
-    def _analyze_cluster_overlap_contact(self, cluster_data1: Dict, cluster_data2: Dict,
-                                       frag1: str, frag2: str, scale: str) -> Optional[ScaleClusterGroundTruth]:
-        """Analyze contact between two clusters with overlap ratios."""
+        # Check each sample point against all points in cluster1
+        for point in sample_points2:
+            dist, _ = tree1.query(point)
+            if dist < self.contact_threshold:  # 2mm threshold
+                return True
+        
+        # Also check the reverse direction for better coverage
+        tree2 = cKDTree(points2)
+        max_check_points1 = min(500, len(points1))
+        
+        if len(points1) > max_check_points1:
+            sample_indices1 = np.random.choice(len(points1), max_check_points1, replace=False)
+            sample_points1 = points1[sample_indices1]
+        else:
+            sample_points1 = points1
+        
+        for point in sample_points1:
+            dist, _ = tree2.query(point)
+            if dist < self.contact_threshold:  # 2mm threshold
+                return True
+        
+        return False
+
+    def _analyze_close_clusters(self, cluster_data1: Dict, cluster_data2: Dict,
+                               frag1: str, frag2: str, scale: str) -> Optional[ScaleClusterGroundTruth]:
+        """Analyze contact between two clusters that have been confirmed to have close points."""
         points1 = cluster_data1['points']
         points2 = cluster_data2['points']
+        center1 = cluster_data1['center']
+        center2 = cluster_data2['center']
         cluster_id1 = cluster_data1['cluster_id']
         cluster_id2 = cluster_data2['cluster_id']
         local_id1 = cluster_data1['local_id']
         local_id2 = cluster_data2['local_id']
         
         # Build KD-trees
-        tree1 = cKDTree(points1)
+        tree1 = cKDTree(points1) 
         tree2 = cKDTree(points2)
         
-        # Find contact points with overlap tracking
+        # Find all contact points with exact 2mm threshold
         contact_mask1 = np.zeros(len(points1), dtype=bool)
         contact_mask2 = np.zeros(len(points2), dtype=bool)
         distances = []
         
-        # Check points in cluster 1 against cluster 2
+        # Check ALL points in cluster 1 against cluster 2
         for i, point in enumerate(points1):
             dist, _ = tree2.query(point)
-            if dist < self.contact_threshold:
+            if dist < self.contact_threshold:  # Exact 2mm
                 contact_mask1[i] = True
                 distances.append(dist)
         
-        # Check points in cluster 2 against cluster 1
+        # Check ALL points in cluster 2 against cluster 1
         for i, point in enumerate(points2):
             dist, _ = tree1.query(point)
-            if dist < self.contact_threshold:
+            if dist < self.contact_threshold:  # Exact 2mm
                 contact_mask2[i] = True
                 distances.append(dist)
         
-        # Calculate overlap ratios
+        # Calculate contact metrics
         contact_count1 = np.sum(contact_mask1)
         contact_count2 = np.sum(contact_mask2)
         total_contact_points = contact_count1 + contact_count2
         
-        # Need minimum contact points
-        if total_contact_points < 5:  # Lower threshold for partial contacts
+        # Minimum contact requirement - at least 3 points must be close
+        if total_contact_points < 3:
             return None
         
         # Calculate overlap ratios
         overlap_ratio1 = contact_count1 / len(points1) if len(points1) > 0 else 0.0
         overlap_ratio2 = contact_count2 / len(points2) if len(points2) > 0 else 0.0
         
-        # Determine contact type based on overlap ratios
+        # Contact type classification - more conservative
         max_overlap = max(overlap_ratio1, overlap_ratio2)
         if max_overlap > 0.7:
             contact_type = "full"
@@ -472,62 +521,39 @@ class MultiScaleClusterGTExtractor:
         else:
             contact_type = "minimal"
         
-        # Skip minimal contacts unless they're significant
-        if contact_type == "minimal" and total_contact_points < 10:
-            return None
-        
-        # Calculate contact metrics
-        contact_points1 = points1[contact_mask1]
-        contact_points2 = points2[contact_mask2]
-        
-        # Contact centers
-        if len(contact_points1) > 0:
+        # Calculate contact centers
+        if contact_count1 > 0:
+            contact_points1 = points1[contact_mask1]
             contact_center1 = np.mean(contact_points1, axis=0)
         else:
-            contact_center1 = cluster_data1['center']
+            contact_center1 = center1
         
-        if len(contact_points2) > 0:
+        if contact_count2 > 0:
+            contact_points2 = points2[contact_mask2]
             contact_center2 = np.mean(contact_points2, axis=0)
         else:
-            contact_center2 = cluster_data2['center']
+            contact_center2 = center2
         
-        # Estimate contact area
-        all_contact_points = []
-        if len(contact_points1) > 0:
-            all_contact_points.append(contact_points1)
-        if len(contact_points2) > 0:
-            all_contact_points.append(contact_points2)
+        # Calculate mean distance and contact area
+        mean_distance = np.mean(distances) if distances else self.contact_threshold
         
-        if all_contact_points:
-            all_contact_points = np.vstack(all_contact_points)
-            
-            if len(all_contact_points) > 3:
-                # Use PCA for contact area estimation
-                centered = all_contact_points - np.mean(all_contact_points, axis=0)
-                cov = np.cov(centered.T)
-                eigenvalues, _ = np.linalg.eigh(cov)
-                # Approximate area as ellipse
-                contact_area = np.pi * np.sqrt(max(eigenvalues[1], 0)) * np.sqrt(max(eigenvalues[2], 0))
-            else:
-                contact_area = float(total_contact_points)  # Fallback
+        # Simple contact area estimation
+        if distances:
+            # Area based on number of contact points and average proximity
+            avg_proximity = self.contact_threshold - mean_distance
+            contact_area = total_contact_points * (avg_proximity ** 2)
         else:
             contact_area = 0.0
         
-        # Calculate confidence based on multiple factors
-        mean_distance = np.mean(distances) if distances else 0.0
+        # Confidence calculation - straightforward approach
+        # Based on: how many points are in contact, how close they are, overlap ratios
+        distance_score = 1.0 - (mean_distance / self.contact_threshold)  # closer = better
+        size_score = min(total_contact_points / 20.0, 1.0)  # normalize by reasonable contact size
+        overlap_score = (overlap_ratio1 + overlap_ratio2) / 2.0
         
-        # Enhanced confidence calculation considering overlaps
-        distance_score = np.exp(-mean_distance / self.contact_threshold)
-        size_score = min(total_contact_points / 50.0, 1.0)  # Normalize by expected contact size
-        overlap_score = (overlap_ratio1 + overlap_ratio2) / 2.0  # Average overlap
-        
-        # Weight factors based on contact type
-        if contact_type == "full":
-            confidence = 0.3 * distance_score + 0.3 * size_score + 0.4 * overlap_score
-        elif contact_type == "partial":
-            confidence = 0.4 * distance_score + 0.3 * size_score + 0.3 * overlap_score
-        else:  # minimal
-            confidence = 0.5 * distance_score + 0.4 * size_score + 0.1 * overlap_score
+        # Weight the scores
+        confidence = 0.4 * distance_score + 0.4 * size_score + 0.2 * overlap_score
+        confidence = max(0.1, min(1.0, confidence))  # Clamp between 0.1 and 1.0
         
         return ScaleClusterGroundTruth(
             scale=scale,
@@ -571,7 +597,7 @@ class MultiScaleClusterGTExtractor:
                 matched_clusters.add(cluster_key1)
                 matched_clusters.add(cluster_key2)
     
-    def _compile_multi_scale_ground_truth(self, contact_pairs):
+    def _compile_multi_scale_ground_truth(self):
         """Compile multi-scale ground truth with cluster-level information."""
         # Fragment information
         fragments = {}
@@ -636,9 +662,21 @@ class MultiScaleClusterGTExtractor:
                 }
             cluster_stats[frag_name] = frag_stats
         
+        # **MODIFICATION: Add fragment contact pairs to JSON output**
+        contact_pairs_for_json = []
+        for frag1, frag2 in self.contact_pairs:
+            # Store as ordered pairs with additional metadata if needed
+            contact_pairs_for_json.append({
+                'fragment_1': frag1,
+                'fragment_2': frag2,
+                'contact_detected': True,
+                'contact_threshold_used': self.contact_threshold
+            })
+        
         return {
             'fragments': fragments,
-            'contact_pairs': [(f1, f2) for f1, f2 in contact_pairs],
+            'contact_pairs': contact_pairs_for_json,  # **MODIFIED: Now includes detailed contact info**
+            'fragment_contact_pairs_simple': [(f1, f2) for f1, f2 in self.contact_pairs],  # **ADDED: Simple list format for backward compatibility**
             'cluster_ground_truth_matches_by_scale': cluster_matches_by_scale,
             'cluster_statistics_by_scale': cluster_stats,
             'extraction_info': {
@@ -647,6 +685,7 @@ class MultiScaleClusterGTExtractor:
                 'max_cluster_distance': self.max_cluster_distance,
                 'scales_processed': self.scales,
                 'extraction_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'total_contact_pairs': len(self.contact_pairs),
                 'total_matches_by_scale': {
                     scale: len(self.cluster_gt_matches[scale]) 
                     for scale in self.scales
@@ -702,6 +741,14 @@ class MultiScaleClusterGTExtractor:
                     scale_group.create_dataset('cluster_centers_1', data=centers_1)
                     scale_group.create_dataset('cluster_centers_2', data=centers_2)
             
+            # Save contact pairs
+            if self.contact_pairs:
+                contact_group = f.create_group('contact_pairs')
+                fragment_1_list = [pair[0].encode('utf8') for pair in self.contact_pairs]
+                fragment_2_list = [pair[1].encode('utf8') for pair in self.contact_pairs]
+                contact_group.create_dataset('fragment_1', data=np.array(fragment_1_list))
+                contact_group.create_dataset('fragment_2', data=np.array(fragment_2_list))
+            
             # Save metadata
             metadata = f.create_group('metadata')
             for key, value in ground_truth['extraction_info'].items():
@@ -732,6 +779,13 @@ class MultiScaleClusterGTExtractor:
         
         print(f"\nFragments: {len(ground_truth['fragments'])}")
         print(f"Contact pairs: {len(ground_truth['contact_pairs'])}")
+        
+        # Print contact pairs for reference
+        print(f"\nFragment Contact Pairs:")
+        for i, contact_info in enumerate(ground_truth['contact_pairs']):
+            frag1 = contact_info['fragment_1']
+            frag2 = contact_info['fragment_2']
+            print(f"  {i+1}. {frag1} ↔ {frag2}")
         
         # Scale-wise summary
         print(f"\nMatches by Scale:")
@@ -850,7 +904,7 @@ def main():
                        help="Path to segmentation file")
     parser.add_argument("--output-dir", default="Ground_Truth",
                        help="Output directory")
-    parser.add_argument("--contact-threshold", type=float, default=1.5,
+    parser.add_argument("--contact-threshold", type=float, default=2.0,
                        help="Point-to-point contact threshold in mm")
     parser.add_argument("--max-cluster-distance", type=float, default=10.0,
                        help="Maximum distance between cluster centers to consider in mm")
