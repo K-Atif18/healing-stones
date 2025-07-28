@@ -2,6 +2,8 @@
 """
 Unified Multi-Scale Assembly Extractor
 Aligned with unified clustering pipeline and multi-scale ground truth
+
+MODIFICATION: Reads fragment contact pairs from JSON ground truth file
 """
 
 import numpy as np
@@ -94,8 +96,8 @@ class UnifiedAssemblyExtractor:
         # Build ground truth lookup for labeling
         self._build_gt_lookup()
         
-        # Load fragment point clouds and find contact pairs
-        self._load_fragments_and_find_contacts()
+        # **MODIFICATION: Load contact pairs from JSON instead of computing them**
+        self._load_contact_pairs_from_gt()
         
     def _load_unified_data(self, clusters_file, segments_file, ground_truth_file):
         """Load data from unified pipeline."""
@@ -185,19 +187,74 @@ class UnifiedAssemblyExtractor:
                 self.gt_matches_by_scale[scale][key1] = match
                 self.gt_matches_by_scale[scale][key2] = match
     
-    def _load_fragments_and_find_contacts(self):
-        """Load fragment point clouds and find contact pairs using same method as GT script."""
+    def _load_contact_pairs_from_gt(self):
+        """Load contact pairs from ground truth JSON file instead of computing them."""
+        
+        # **MODIFICATION: Read contact pairs from JSON**
+        if 'contact_pairs' in self.ground_truth:
+            # New format with detailed contact info
+            contact_pairs_data = self.ground_truth['contact_pairs']
+            self.contact_pairs = []
+            
+            for contact_info in contact_pairs_data:
+                frag1 = contact_info['fragment_1']
+                frag2 = contact_info['fragment_2']
+                self.contact_pairs.append((frag1, frag2))
+                
+        elif 'fragment_contact_pairs_simple' in self.ground_truth:
+            # Simple list format for backward compatibility
+            self.contact_pairs = self.ground_truth['fragment_contact_pairs_simple']
+            
+        else:
+            # Fallback: extract from existing matches if available
+            logger.warning("No contact pairs found in ground truth JSON. Extracting from cluster matches...")
+            self.contact_pairs = self._extract_pairs_from_matches()
+        
+        # Load fragments for point cloud data (only for fragments that have contact pairs)
+        self._load_fragments_for_contact_pairs()
+        
+        print(f"\nASSEMBLY SCRIPT - CONTACT PAIRS FROM JSON ({len(self.contact_pairs)}):")
+        for i, (frag1, frag2) in enumerate(self.contact_pairs):
+            print(f"  {i+1}. {frag1} ↔ {frag2}")
+        print()
+    
+    def _extract_pairs_from_matches(self):
+        """Extract unique contact pairs from existing cluster matches (fallback)."""
+        pairs = set()
+        
+        gt_matches_by_scale = self.ground_truth.get('cluster_ground_truth_matches_by_scale', {})
+        for scale_matches in gt_matches_by_scale.values():
+            for match in scale_matches:
+                frag1 = match['fragment_1']
+                frag2 = match['fragment_2']
+                # Normalize order to avoid duplicates
+                pair = tuple(sorted([frag1, frag2]))
+                pairs.add(pair)
+        
+        return list(pairs)
+    
+    def _load_fragments_for_contact_pairs(self):
+        """Load fragment point clouds only for fragments involved in contact pairs."""
+        
+        # Get unique fragments from contact pairs
+        fragments_needed = set()
+        for frag1, frag2 in self.contact_pairs:
+            fragments_needed.add(frag1)
+            fragments_needed.add(frag2)
         
         self.fragments = {}
         
-        # Load all PLY files
-        ply_files = sorted(self.ply_dir.glob("*.ply"))
-        
-        for ply_file in ply_files:
-            fragment_name = ply_file.stem
+        # Load only the PLY files we need
+        for fragment_name in fragments_needed:
+            ply_file = self.ply_dir / f"{fragment_name}.ply"
             
+            if not ply_file.exists():
+                logger.warning(f"PLY file not found for fragment: {fragment_name}")
+                continue
+                
             # Skip if not in our cluster data
             if fragment_name not in self.hierarchical_clusters:
+                logger.warning(f"Fragment {fragment_name} not found in cluster data")
                 continue
             
             # Load point cloud
@@ -213,60 +270,12 @@ class UnifiedAssemblyExtractor:
                 'n_points': len(points)
             }
         
-        # Find contact pairs using same method as GT script
-        self.contact_pairs = self._find_fragment_contacts()
-    
-    def _find_fragment_contacts(self):
-        """Find which fragments are in contact using same method as GT script."""
-        
-        fragment_names = sorted(self.fragments.keys())
-        contact_pairs = []
-        
-        # Check all pairs
-        for i in range(len(fragment_names)):
-            for j in range(i + 1, len(fragment_names)):
-                frag1 = fragment_names[i]
-                frag2 = fragment_names[j]
-                
-                if self._check_fragment_contact(frag1, frag2):
-                    contact_pairs.append((frag1, frag2))
-        
-        return contact_pairs
-    
-    def _check_fragment_contact(self, frag1: str, frag2: str) -> bool:
-        """Quick check if two fragments are in contact using EXACT same method as GT script."""
-        if frag1 not in self.fragments or frag2 not in self.fragments:
-            return False
-            
-        points1 = self.fragments[frag1]['points']
-        points2 = self.fragments[frag2]['points']
-        
-        # Quick bounding box check (EXACT same as GT script)
-        min1, max1 = np.min(points1, axis=0), np.max(points1, axis=0)
-        min2, max2 = np.min(points2, axis=0), np.max(points2, axis=0)
-        
-        for dim in range(3):
-            if min1[dim] - self.contact_threshold > max2[dim]:
-                return False
-            if min2[dim] - self.contact_threshold > max1[dim]:
-                return False
-        
-        # Sample check for efficiency (EXACT same as GT script)
-        # Set random seed for deterministic results
-        np.random.seed(42)
-        sample_size = min(1000, len(points1))
-        sample_indices = np.random.choice(len(points1), sample_size, replace=False)
-        sample_points = points1[sample_indices]
-        
-        tree2 = cKDTree(points2)
-        distances, _ = tree2.query(sample_points)
-        
-        return np.min(distances) < self.contact_threshold
+        logger.info(f"Loaded {len(self.fragments)} fragments for contact pairs")
     
     def extract_multi_scale_assembly_knowledge(self):
         """Extract assembly knowledge across all scales."""
         
-        print(f"Processing {len(self.contact_pairs)} contact pairs:")
+        print(f"Processing {len(self.contact_pairs)} contact pairs from ground truth JSON:")
         for i, (frag1, frag2) in enumerate(self.contact_pairs):
             print(f"  {i+1}. {frag1} ↔ {frag2}")
         
@@ -484,59 +493,6 @@ class UnifiedAssemblyExtractor:
             # Optionally boost confidence for GT matches (but not required)
             # match.match_confidence = max(match.match_confidence, 0.7)
     
-    def _find_missing_gt_matches(self, frag1: str, frag2: str, scale: str, 
-                               existing_matches: List[MultiScaleClusterMatch]) -> List[MultiScaleClusterMatch]:
-        """Find GT matches that weren't found in similarity comparison."""
-        
-        missing_matches = []
-        gt_lookup = self.gt_matches_by_scale.get(scale, {})
-        
-        # Get existing match keys
-        existing_keys = set()
-        for match in existing_matches:
-            key = (match.fragment_1, match.local_id_1, match.fragment_2, match.local_id_2)
-            existing_keys.add(key)
-        
-        # Check all GT matches for this pair
-        for key, gt_match in gt_lookup.items():
-            gt_frag1, gt_local1, gt_frag2, gt_local2 = key
-            
-            # Check if this GT match involves our fragment pair
-            if ((gt_frag1 == frag1 and gt_frag2 == frag2) or 
-                (gt_frag1 == frag2 and gt_frag2 == frag1)):
-                
-                if key not in existing_keys:
-                    # Create a match for this missing GT
-                    logger.warning(f"Found GT match not in similarity results: {key}")
-                    
-                    # Create minimal match with GT labeling
-                    missing_match = MultiScaleClusterMatch(
-                        scale=scale,
-                        fragment_1=gt_frag1,
-                        fragment_2=gt_frag2,
-                        cluster_id_1=gt_match.get('cluster_id_1', ''),
-                        cluster_id_2=gt_match.get('cluster_id_2', ''),
-                        local_id_1=gt_local1,
-                        local_id_2=gt_local2,
-                        normal_similarity=0.0,  # Unknown
-                        size_similarity=0.0,    # Unknown
-                        shape_similarity=0.0,   # Unknown
-                        spatial_proximity=0.0,  # Unknown
-                        match_confidence=0.0,   # Low since not found by similarity
-                        is_ground_truth=True,
-                        gt_confidence=gt_match.get('confidence', 0.0),
-                        gt_overlap_ratio_1=gt_match.get('overlap_ratio_1', 0.0),
-                        gt_overlap_ratio_2=gt_match.get('overlap_ratio_2', 0.0),
-                        gt_contact_type=gt_match.get('contact_type', 'unknown')
-                    )
-                    
-                    missing_matches.append(missing_match)
-        
-        if missing_matches:
-            logger.info(f"Added {len(missing_matches)} missing GT matches for {frag1} ↔ {frag2}")
-        
-        return missing_matches
-    
     def _count_gt_matches_for_pair(self, frag1: str, frag2: str, scale: str) -> int:
         """Count how many GT matches exist for a specific fragment pair at a scale."""
         gt_lookup = self.gt_matches_by_scale.get(scale, {})
@@ -589,6 +545,7 @@ class UnifiedAssemblyExtractor:
             f.write("="*100 + "\n")
             f.write(f"Generated: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Contact pairs processed: {len(self.contact_pairs)}\n")
+            f.write("NOTE: Contact pairs loaded from ground truth JSON file\n")
             f.write("="*100 + "\n")
             
             for scale in self.scales:
@@ -822,10 +779,20 @@ class UnifiedAssemblyExtractor:
                 for key, values in data_arrays.items():
                     scale_group.create_dataset(key, data=np.array(values))
             
+            # Save contact pairs from JSON
+            if self.contact_pairs:
+                contact_group = f.create_group('contact_pairs_from_json')
+                fragment_1_list = [pair[0].encode('utf8') for pair in self.contact_pairs]
+                fragment_2_list = [pair[1].encode('utf8') for pair in self.contact_pairs]
+                contact_group.create_dataset('fragment_1', data=np.array(fragment_1_list))
+                contact_group.create_dataset('fragment_2', data=np.array(fragment_2_list))
+            
             # Save metadata
             metadata = f.create_group('metadata')
             metadata.attrs['scales_processed'] = [s.encode('utf8') for s in self.scales]
             metadata.attrs['total_fragments'] = len(self.hierarchical_clusters)
+            metadata.attrs['contact_pairs_from_json'] = True
+            metadata.attrs['total_contact_pairs'] = len(self.contact_pairs)
             
             for scale in self.scales:
                 matches = all_matches_by_scale.get(scale, [])
@@ -841,6 +808,8 @@ class UnifiedAssemblyExtractor:
         
         with open(report_file, 'w') as f:
             f.write("UNIFIED MULTI-SCALE ASSEMBLY EXTRACTION REPORT\n")
+            f.write("="*80 + "\n")
+            f.write("NOTE: Contact pairs loaded from ground truth JSON file\n")
             f.write("="*80 + "\n\n")
             
             # Overall summary
@@ -851,7 +820,8 @@ class UnifiedAssemblyExtractor:
             f.write("OVERALL SUMMARY:\n")
             f.write(f"Total matches across all scales: {total_matches:,}\n")
             f.write(f"Ground truth matches: {total_gt:,}\n")
-            f.write(f"GT percentage: {total_gt/total_matches*100:.1f}%\n\n")
+            f.write(f"GT percentage: {total_gt/total_matches*100:.1f}%\n")
+            f.write(f"Contact pairs from JSON: {len(self.contact_pairs)}\n\n")
             
             # Scale-wise breakdown
             f.write("SCALE-WISE BREAKDOWN:\n")
@@ -956,7 +926,7 @@ def main():
                       for matches in all_matches_by_scale.values())
         
         print(f"\nOVERALL SUMMARY:")
-        print(f"Contact pairs: {len(extractor.contact_pairs)}")
+        print(f"Contact pairs (from JSON): {len(extractor.contact_pairs)}")
         print(f"Total matches: {total_matches:,}")
         print(f"GT matches found: {total_gt:,}")
         
@@ -977,6 +947,7 @@ def main():
             print(f"High confidence precision: {hc_precision:.3f} ({hc_precision*100:.1f}%)")
         
         print(f"\nResults saved to: {args.output_dir}")
+        print(f"Contact pairs loaded from: {args.ground_truth}")
         
         logger.info("Unified assembly extraction completed successfully!")
         
