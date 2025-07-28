@@ -56,15 +56,36 @@ class GTClusterVisualizer:
         logger.info(f"Loaded GT with {len(self.contact_pairs)} contact pairs")
         
     def _load_ground_truth(self):
-        """Load ground truth data."""
+        """Load ground truth data with proper handling of different formats."""
         logger.info(f"Loading ground truth from {self.gt_file}")
         
         with open(self.gt_file, 'r') as f:
             self.gt_data = json.load(f)
         
-        # Extract contact pairs and matches by scale
-        self.contact_pairs = [tuple(pair) for pair in self.gt_data['contact_pairs']]
-        self.matches_by_scale = self.gt_data['cluster_ground_truth_matches_by_scale']
+        # Extract contact pairs - handle both formats
+        if 'contact_pairs' in self.gt_data:
+            contact_pairs_data = self.gt_data['contact_pairs']
+            
+            # Check if it's the new detailed format or simple format
+            if isinstance(contact_pairs_data, list) and len(contact_pairs_data) > 0:
+                if isinstance(contact_pairs_data[0], dict):
+                    # New detailed format: [{'fragment_1': 'frag_1', 'fragment_2': 'frag_2', ...}, ...]
+                    self.contact_pairs = [(pair['fragment_1'], pair['fragment_2']) for pair in contact_pairs_data]
+                else:
+                    # Simple format: [['frag_1', 'frag_2'], ...]
+                    self.contact_pairs = [tuple(pair) for pair in contact_pairs_data]
+            else:
+                self.contact_pairs = []
+        
+        # Fallback to simple format if available
+        if not hasattr(self, 'contact_pairs') or not self.contact_pairs:
+            if 'fragment_contact_pairs_simple' in self.gt_data:
+                self.contact_pairs = [tuple(pair) for pair in self.gt_data['fragment_contact_pairs_simple']]
+            else:
+                self.contact_pairs = []
+        
+        # Extract matches by scale
+        self.matches_by_scale = self.gt_data.get('cluster_ground_truth_matches_by_scale', {})
         
         # Create lookup for quick access
         self.matches_lookup = {}
@@ -78,6 +99,7 @@ class GTClusterVisualizer:
                 self.matches_lookup[pair_key][scale].append(match)
         
         logger.info(f"Processed matches for {len(self.matches_lookup)} fragment pairs")
+        logger.info(f"Contact pairs format: {type(self.contact_pairs[0]) if self.contact_pairs else 'empty'}")
     
     def _load_cluster_data(self):
         """Load cluster data for point mapping with fallback options."""
@@ -150,7 +172,14 @@ class GTClusterVisualizer:
         print("AVAILABLE FRAGMENT CONTACT PAIRS")
         print("="*70)
         
-        for i, (frag1, frag2) in enumerate(self.contact_pairs):
+        for i, contact_pair in enumerate(self.contact_pairs):
+            # Handle tuple format
+            if isinstance(contact_pair, (list, tuple)) and len(contact_pair) >= 2:
+                frag1, frag2 = contact_pair[0], contact_pair[1]
+            else:
+                print(f"Error: Invalid contact pair format at index {i}: {contact_pair}")
+                continue
+                
             print(f"\n{i+1:2d}. {frag1} ↔ {frag2}")
             
             pair_matches = self.matches_lookup.get((frag1, frag2), {})
@@ -176,7 +205,14 @@ class GTClusterVisualizer:
             print(f"Invalid pair index. Choose 1-{len(self.contact_pairs)}")
             return
         
-        frag1, frag2 = self.contact_pairs[pair_index - 1]
+        # Handle contact pair format safely
+        contact_pair = self.contact_pairs[pair_index - 1]
+        if isinstance(contact_pair, (list, tuple)) and len(contact_pair) >= 2:
+            frag1, frag2 = contact_pair[0], contact_pair[1]
+        else:
+            print(f"Error: Invalid contact pair format: {contact_pair}")
+            return
+            
         logger.info(f"Visualizing matches between {frag1} and {frag2} at scale {scale}")
         
         # Get matches for this pair and scale
@@ -466,6 +502,8 @@ class GTClusterVisualizer:
                 break
             except Exception as e:
                 print(f"Error: {e}")
+                import traceback
+                traceback.print_exc()
     
     def _interactive_pair_selection(self):
         """Interactive pair selection with detailed options."""
@@ -485,6 +523,8 @@ class GTClusterVisualizer:
             print("Invalid input. Please enter numbers where required.")
         except Exception as e:
             print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _quick_visualization(self):
         """Quick visualization with minimal input."""
@@ -504,6 +544,8 @@ class GTClusterVisualizer:
             print("Invalid input. Use format: pair_index scale top_n")
         except Exception as e:
             print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def main():
