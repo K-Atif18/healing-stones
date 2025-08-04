@@ -233,34 +233,71 @@ class PLYFaceVisualizer:
         print(f"Downsampled to {len(new_face_labels)} faces for visualization")
         return downsampled_mesh, new_face_labels
     
+    def assign_vertex_colors_from_faces(self, mesh, face_labels):
+        """Assign vertex colors based on face segment labels."""
+        vertices = np.asarray(mesh.vertices)
+        triangles = np.asarray(mesh.triangles)
+        
+        # Initialize vertex colors (default gray)
+        vertex_colors = np.full((len(vertices), 3), 0.5)
+        vertex_votes = np.zeros(len(vertices))  # Track how many faces influence each vertex
+        
+        unique_labels = np.unique(face_labels)
+        valid_labels = unique_labels[unique_labels >= 0]
+        
+        # For each face, contribute its color to its vertices
+        for label in valid_labels:
+            face_mask = face_labels == label
+            face_indices = np.where(face_mask)[0]
+            
+            color_idx = label % len(self.colors)
+            color = self.colors[color_idx]
+            
+            # Get all vertices belonging to faces with this label
+            face_triangles = triangles[face_mask]
+            face_vertices = np.unique(face_triangles.flatten())
+            
+            # Add color contribution to these vertices
+            vertex_colors[face_vertices] += color
+            vertex_votes[face_vertices] += 1
+        
+        # Average colors for vertices influenced by multiple faces
+        valid_votes = vertex_votes > 0
+        vertex_colors[valid_votes] /= vertex_votes[valid_votes, np.newaxis]
+        
+        return vertex_colors
+    
     def visualize_segmented_mesh(self, mesh, face_labels, save_path=None):
         """Visualize mesh with different colors for each face segment using Open3D."""
         
+        # Check if only one segment found - suggest different parameters
+        unique_labels = np.unique(face_labels)
+        valid_labels = unique_labels[unique_labels >= 0]
+        
+        if len(valid_labels) <= 1:
+            print(f"\nWARNING: Only {len(valid_labels)} face segment(s) found!")
+            print("This suggests the mesh is very smooth or angle threshold is too high.")
+            print("Try running with a smaller angle threshold, e.g.:")
+            print("  --angle_threshold 15.0   (for more sensitive edge detection)")
+            print("  --angle_threshold 10.0   (for very sensitive edge detection)")
+            print("  --min_face_size 500      (to allow smaller segments)")
+            
+            if len(valid_labels) == 0:
+                print("No segments to visualize. Exiting.")
+                return None
+        
         # Downsample if necessary
         vis_mesh, vis_face_labels = self.downsample_for_visualization(mesh, face_labels)
+        print(f"Found {len(np.unique(vis_face_labels[vis_face_labels >= 0]))} face segments in visualization")
         
-        # Create color array for each triangle
-        num_faces = len(vis_face_labels)
-        face_colors = np.zeros((num_faces, 3))
+        # Create vertex colors from face labels
+        vertex_colors = self.assign_vertex_colors_from_faces(vis_mesh, vis_face_labels)
         
-        unique_labels = np.unique(vis_face_labels)
-        valid_labels = unique_labels[unique_labels >= 0]
-        print(f"Found {len(valid_labels)} face segments in visualization")
-        
-        # Assign colors to each face segment
-        for i, label in enumerate(valid_labels):
-            color_idx = i % len(self.colors)
-            face_colors[vis_face_labels == label] = self.colors[color_idx]
-        
-        # Gray color for unassigned faces
-        unassigned_mask = vis_face_labels == -1
-        face_colors[unassigned_mask] = [0.5, 0.5, 0.5]
-        
-        # Create visualization mesh
+        # Create visualization mesh with vertex colors
         final_mesh = o3d.geometry.TriangleMesh()
         final_mesh.vertices = vis_mesh.vertices
         final_mesh.triangles = vis_mesh.triangles
-        final_mesh.triangle_colors = o3d.utility.Vector3dVector(face_colors)
+        final_mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
         
         # Compute vertex normals for better lighting
         final_mesh.compute_vertex_normals()
@@ -351,16 +388,16 @@ class PLYFaceVisualizer:
 def main():
     parser = argparse.ArgumentParser(description='Segment and visualize 3D PLY fragments by faces')
     parser.add_argument('ply_file', help='Path to PLY file')
-    parser.add_argument('--angle_threshold', type=float, default=30.0, 
-                       help='Angle threshold in degrees for sharp edge detection (default: 30.0)')
-    parser.add_argument('--min_face_size', type=int, default=1000,
-                       help='Minimum number of triangles per face segment (default: 1000)')
+    parser.add_argument('--angle_threshold', type=float, default=15.0, 
+                       help='Angle threshold in degrees for sharp edge detection (default: 15.0)')
+    parser.add_argument('--min_face_size', type=int, default=500,
+                       help='Minimum number of triangles per face segment (default: 500)')
     parser.add_argument('--save_screenshot', type=str, default=None,
                        help='Path to save screenshot of visualization')
     parser.add_argument('--save_statistics', type=str, default=None,
                        help='Path to save statistics plot')
-    parser.add_argument('--max_vis_faces', type=int, default=100000,
-                       help='Maximum faces for visualization (default: 100000)')
+    parser.add_argument('--max_vis_faces', type=int, default=300000,
+                       help='Maximum faces for visualization (default: 300000)')
     
     args = parser.parse_args()
     
@@ -417,4 +454,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
