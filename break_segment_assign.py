@@ -18,18 +18,15 @@ class StoneFragmentFaceClassifier:
         """
         self.downsample_factor = downsample_factor
         
-        # Roughness thresholds for surface classification
+        # Roughness thresholds for surface classification (simplified to 2 types)
         self.roughness_thresholds = {
-            'break_max': 0.002,      # Very smooth (virtual breaks from cell fracture)
-            'carved_min': 0.015,     # Rough carved surfaces
-            'original_range': (0.002, 0.015)  # Medium roughness original surfaces
+            'break_max': 0.005,      # Very smooth (virtual breaks from cell fracture)
         }
         
         # Colors for different surface types
         self.surface_colors = {
             'break': np.array([0.2, 0.2, 0.9]),     # Blue for break surfaces
             'carved': np.array([0.9, 0.2, 0.2]),    # Red for carved surfaces
-            'original': np.array([0.2, 0.9, 0.2]),  # Green for original surfaces
             'unclassified': np.array([0.7, 0.7, 0.7])  # Gray for unclassified
         }
         
@@ -225,35 +222,28 @@ class StoneFragmentFaceClassifier:
         return roughness_metrics
     
     def classify_faces(self, face_roughness):
-        """Classify faces based on roughness into carved/original/break categories."""
+        """Classify faces based on roughness into carved/break categories."""
         face_classifications = {}
         
         print(f"\nClassifying faces based on roughness...")
-        print(f"Thresholds: Break ≤ {self.roughness_thresholds['break_max']:.3f}, "
-              f"Carved ≥ {self.roughness_thresholds['carved_min']:.3f}, "
-              f"Original {self.roughness_thresholds['original_range'][0]:.3f}-{self.roughness_thresholds['original_range'][1]:.3f}")
+        print(f"Threshold: Break ≤ {self.roughness_thresholds['break_max']:.3f}, Carved > {self.roughness_thresholds['break_max']:.3f}")
         print("-" * 80)
         
         for face_id, metrics in face_roughness.items():
             combined_roughness = metrics['combined_roughness']
             
-            # Classify based on roughness thresholds
+            # Simplified classification: break vs carved only
             if combined_roughness <= self.roughness_thresholds['break_max']:
                 face_type = 'break'
-            elif combined_roughness >= self.roughness_thresholds['carved_min']:
-                face_type = 'carved'
-            elif (self.roughness_thresholds['original_range'][0] <= combined_roughness <= 
-                  self.roughness_thresholds['original_range'][1]):
-                face_type = 'original'
             else:
-                face_type = 'unclassified'
+                face_type = 'carved'
             
             face_classifications[face_id] = {
                 'type': face_type,
                 'roughness_metrics': metrics
             }
             
-            print(f"Face {face_id:2d}: {face_type:12s} (roughness: {combined_roughness:.6f})")
+            print(f"Face {face_id:2d}: {face_type:6s} (roughness: {combined_roughness:.6f})")
         
         return face_classifications
     
@@ -262,8 +252,8 @@ class StoneFragmentFaceClassifier:
         points = np.asarray(pcd.points)
         point_colors = np.zeros((len(points), 3))
         
-        # Count surfaces by type
-        surface_type_counts = {'break': 0, 'carved': 0, 'original': 0, 'unclassified': 0}
+        # Count surfaces by type (simplified to 2 types)
+        surface_type_counts = {'break': 0, 'carved': 0, 'unclassified': 0}
         
         print(f"\nColoring faces by classification...")
         
@@ -294,9 +284,8 @@ class StoneFragmentFaceClassifier:
         print(f"\n" + "="*50)
         print(f"FACE CLASSIFICATION SUMMARY")
         print(f"="*50)
-        print(f"🔵 Break surfaces:   {surface_type_counts['break']:2d} faces")
-        print(f"🔴 Carved surfaces:  {surface_type_counts['carved']:2d} faces")
-        print(f"🟢 Original surfaces: {surface_type_counts['original']:2d} faces")
+        print(f"🔵 Break surfaces:   {surface_type_counts['break']:2d} faces (smooth)")
+        print(f"🔴 Carved surfaces:  {surface_type_counts['carved']:2d} faces (rough)")
         print(f"⚫ Unclassified:     {surface_type_counts['unclassified']:2d} faces")
         print(f"="*50)
         
@@ -306,10 +295,9 @@ class StoneFragmentFaceClassifier:
         """Display the classified faces in Open3D viewer."""
         print("\nDisplaying classified faces in Open3D...")
         print("Legend:")
-        print("🔵 BLUE   = Break surfaces (very smooth)")
-        print("🔴 RED    = Carved surfaces (rough)")
-        print("🟢 GREEN  = Original surfaces (medium roughness)")
-        print("⚫ GRAY   = Unclassified surfaces")
+        print("🔵 BLUE = Break surfaces (very smooth - from virtual fracturing)")
+        print("🔴 RED  = Carved surfaces (rough - all other surfaces)")
+        print("⚫ GRAY = Unclassified surfaces")
         print("\nControls:")
         print("- Mouse: Rotate view")
         print("- Mouse wheel: Zoom")
@@ -568,7 +556,6 @@ def main():
         print(f"Total faces found: {len(result['face_classifications'])}")
         print(f"Break surfaces: {result['surface_counts']['break']}")
         print(f"Carved surfaces: {result['surface_counts']['carved']}")
-        print(f"Original surfaces: {result['surface_counts']['original']}")
 
 if __name__ == "__main__":
     main()
