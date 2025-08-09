@@ -18,17 +18,49 @@ class StoneFragmentFaceClassifier:
         """
         self.downsample_factor = downsample_factor
         
+    def __init__(self, downsample_factor=1.0):
+        """
+        Initialize stone fragment face classifier.
+        
+        Args:
+            downsample_factor: Factor to downsample point cloud (1.0 = no downsampling)
+        """
+        self.downsample_factor = downsample_factor
+        
         # Roughness thresholds for surface classification (simplified to 2 types)
         self.roughness_thresholds = {
             'break_max': 0.005,      # Very smooth (virtual breaks from cell fracture)
         }
         
-        # Colors for different surface types
-        self.surface_colors = {
-            'break': np.array([0.2, 0.2, 0.9]),     # Blue for break surfaces
-            'carved': np.array([0.9, 0.2, 0.2]),    # Red for carved surfaces
-            'unclassified': np.array([0.7, 0.7, 0.7])  # Gray for unclassified
-        }
+        # Colors for break surfaces (always blue)
+        self.break_color = np.array([0.2, 0.2, 0.9])  # Blue for break surfaces
+        
+        # Generate distinct colors for carved surfaces
+        self.carved_colors = np.array([
+            [1.0, 0.0, 0.0],    # Red
+            [0.0, 0.8, 0.0],    # Green
+            [1.0, 0.6, 0.0],    # Orange
+            [0.8, 0.0, 0.8],    # Magenta
+            [0.0, 0.8, 0.8],    # Cyan
+            [1.0, 1.0, 0.0],    # Yellow
+            [0.6, 0.0, 1.0],    # Purple
+            [1.0, 0.4, 0.6],    # Pink
+            [0.4, 0.8, 0.2],    # Lime Green
+            [0.8, 0.4, 0.0],    # Brown
+            [0.6, 0.6, 0.0],    # Olive
+            [0.8, 0.0, 0.4],    # Dark Pink
+            [0.0, 0.6, 0.6],    # Teal
+            [0.4, 0.0, 0.8],    # Indigo
+            [0.8, 0.8, 0.0],    # Gold
+            [0.6, 0.2, 0.8],    # Violet
+            [0.2, 0.8, 0.4],    # Sea Green
+            [0.8, 0.2, 0.6],    # Rose
+            [0.4, 0.6, 0.8],    # Sky Blue
+            [0.8, 0.6, 0.2],    # Amber
+        ])
+        
+        # Gray for unclassified
+        self.unclassified_color = np.array([0.7, 0.7, 0.7])
         
     def load_ply_as_pointcloud(self, filepath):
         """Load PLY file and convert to point cloud."""
@@ -280,14 +312,95 @@ class StoneFragmentFaceClassifier:
         colored_pcd.points = pcd.points
         colored_pcd.colors = o3d.utility.Vector3dVector(point_colors)
         
+    def create_classified_visualization(self, pcd, labels, face_classifications):
+        """Create visualization with faces colored by their classification."""
+        points = np.asarray(pcd.points)
+        point_colors = np.zeros((len(points), 3))
+        
+        # Count surfaces by type
+        surface_type_counts = {'break': 0, 'carved': 0, 'unclassified': 0}
+        
+        print(f"\nColoring faces by classification...")
+        
+        # Separate break and carved faces
+        break_faces = []
+        carved_faces = []
+        
+        for face_id, classification in face_classifications.items():
+            face_type = classification['type']
+            if face_type == 'break':
+                break_faces.append(face_id)
+            elif face_type == 'carved':
+                carved_faces.append(face_id)
+        
+        # Color break surfaces (all blue)
+        for face_id in break_faces:
+            face_mask = labels == face_id
+            point_colors[face_mask] = self.break_color
+            surface_type_counts['break'] += 1
+            print(f"Face {face_id}: BREAK (blue) - {np.sum(face_mask)} points")
+        
+        # Color carved surfaces (different colors for each)
+        for i, face_id in enumerate(carved_faces):
+            face_mask = labels == face_id
+            color_idx = i % len(self.carved_colors)
+            point_colors[face_mask] = self.carved_colors[color_idx]
+            surface_type_counts['carved'] += 1
+            
+            color_name = self._get_color_name(self.carved_colors[color_idx])
+            print(f"Face {face_id}: CARVED ({color_name}) - {np.sum(face_mask)} points")
+        
+        # Gray for unassigned points
+        unassigned_mask = labels == -1
+        point_colors[unassigned_mask] = self.unclassified_color
+        unassigned_count = np.sum(unassigned_mask)
+        if unassigned_count > 0:
+            print(f"Unassigned: {unassigned_count} points")
+            surface_type_counts['unclassified'] = 1
+        
+        # Create colored point cloud
+        colored_pcd = o3d.geometry.PointCloud()
+        colored_pcd.points = pcd.points
+        colored_pcd.colors = o3d.utility.Vector3dVector(point_colors)
+        
         # Print classification summary
         print(f"\n" + "="*50)
         print(f"FACE CLASSIFICATION SUMMARY")
         print(f"="*50)
         print(f"🔵 Break surfaces:   {surface_type_counts['break']:2d} faces (smooth)")
-        print(f"🔴 Carved surfaces:  {surface_type_counts['carved']:2d} faces (rough)")
-        print(f"⚫ Unclassified:     {surface_type_counts['unclassified']:2d} faces")
+        print(f"🎨 Carved surfaces:  {surface_type_counts['carved']:2d} faces (rough - each in different color)")
+        if surface_type_counts['unclassified'] > 0:
+            print(f"⚫ Unclassified:     {surface_type_counts['unclassified']:2d} faces")
         print(f"="*50)
+        
+        return colored_pcd, surface_type_counts
+    
+    def _get_color_name(self, color):
+        """Get a descriptive name for a color."""
+        r, g, b = color
+        
+        if r > 0.8 and g < 0.3 and b < 0.3:
+            return "red"
+        elif g > 0.7 and r < 0.3 and b < 0.3:
+            return "green"
+        elif r > 0.8 and g > 0.5 and b < 0.3:
+            return "orange"
+        elif r > 0.7 and g < 0.3 and b > 0.7:
+            return "magenta"
+        elif r < 0.3 and g > 0.7 and b > 0.7:
+            return "cyan"
+        elif r > 0.8 and g > 0.8 and b < 0.3:
+            return "yellow"
+        elif r > 0.5 and g < 0.3 and b > 0.8:
+            return "purple"
+        elif r > 0.8 and g > 0.3 and b > 0.5:
+            return "pink"
+        elif r > 0.7 and g > 0.3 and b < 0.3:
+            return "brown"
+        elif r < 0.5 and g > 0.5 and b > 0.7:
+            return "sky blue"
+        else:
+            return "mixed"
         
         return colored_pcd, surface_type_counts
     
@@ -296,7 +409,7 @@ class StoneFragmentFaceClassifier:
         print("\nDisplaying classified faces in Open3D...")
         print("Legend:")
         print("🔵 BLUE = Break surfaces (very smooth - from virtual fracturing)")
-        print("🔴 RED  = Carved surfaces (rough - all other surfaces)")
+        print("🎨 MULTIPLE COLORS = Carved surfaces (rough - each face has unique color)")
         print("⚫ GRAY = Unclassified surfaces")
         print("\nControls:")
         print("- Mouse: Rotate view")
@@ -533,7 +646,7 @@ def main():
     parser.add_argument('ply_file', help='Path to PLY file')
     parser.add_argument('--downsample', type=float, default=1.0,
                        help='Downsample factor (1.0 = no downsampling, 0.5 = half points)')
-    parser.add_argument('--eps', type=float, default=0.15,
+    parser.add_argument('--eps', type=float, default=0.10,
                        help='DBSCAN eps parameter for face segmentation')
     parser.add_argument('--min_samples', type=int, default=100,
                        help='DBSCAN min_samples parameter for face segmentation')
