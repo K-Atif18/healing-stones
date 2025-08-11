@@ -7,17 +7,12 @@ from scipy.spatial import cKDTree
 import argparse
 import os
 import time
+import pickle
+import json
+from pathlib import Path
+import glob
 
 class StoneFragmentFaceClassifier:
-    def __init__(self, downsample_factor=1.0):
-        """
-        Initialize stone fragment face classifier.
-        
-        Args:
-            downsample_factor: Factor to downsample point cloud (1.0 = no downsampling)
-        """
-        self.downsample_factor = downsample_factor
-        
     def __init__(self, downsample_factor=1.0):
         """
         Initialize stone fragment face classifier.
@@ -176,8 +171,8 @@ class StoneFragmentFaceClassifier:
         deviations = []
         normal_variations = []
         
-        # Sample points for efficiency (max 500 points per face)
-        n_samples = min(500, len(face_points))
+        # Sample points for efficiency (max 200 points per face for roughness calculation)
+        n_samples = min(200, len(face_points))
         sample_indices = np.linspace(0, len(face_points)-1, n_samples, dtype=int)
         
         for i in sample_indices:
@@ -197,50 +192,58 @@ class StoneFragmentFaceClassifier:
                     continue
                 
                 try:
-                    # Compute covariance matrix
-                    cov_matrix = np.cov(centered_points.T)
-                    eigenvals, eigenvecs = np.linalg.eigh(cov_matrix)
+                    # Use SVD for better numerical stability
+                    U, s, Vt = np.linalg.svd(centered_points, full_matrices=False)
                     
-                    # The eigenvector with smallest eigenvalue is the normal
-                    plane_normal = eigenvecs[:, 0]
-                    
-                    # Calculate distances from points to the plane
-                    distances = np.abs(np.dot(centered_points, plane_normal))
-                    deviations.extend(distances)
+                    # Check if we have enough variation
+                    if len(s) > 0 and s[0] > 1e-8:
+                        # The last row of Vt is the normal to the best-fit plane
+                        plane_normal = Vt[-1]
+                        
+                        # Calculate distances from points to the plane
+                        distances = np.abs(np.dot(centered_points, plane_normal))
+                        deviations.extend(distances)
                     
                 except (np.linalg.LinAlgError, ValueError):
-                    # Handle singular matrix case
                     continue
                 
                 # Calculate normal variation (angular deviation)
-                if i < len(face_normals) and len(neighbors_idx) <= len(face_normals):
+                if i < len(face_normals):
                     try:
                         current_normal = face_normals[i]
-                        neighbor_normals = face_normals[neighbors_idx]
                         
-                        for neighbor_normal in neighbor_normals:
-                            # Calculate angle between normals
-                            dot_product = np.clip(np.abs(np.dot(current_normal, neighbor_normal)), 0, 1)
-                            angle = np.arccos(dot_product)
-                            normal_variations.append(angle)
+                        # Get neighbor normals (ensure indices are valid)
+                        valid_neighbor_indices = [idx for idx in neighbors_idx if idx < len(face_normals)]
+                        
+                        if valid_neighbor_indices:
+                            neighbor_normals = face_normals[valid_neighbor_indices]
+                            
+                            for neighbor_normal in neighbor_normals:
+                                # Calculate angle between normals
+                                dot_product = np.clip(np.abs(np.dot(current_normal, neighbor_normal)), 0, 1)
+                                angle = np.arccos(dot_product)
+                                normal_variations.append(angle)
                     except (IndexError, ValueError):
                         continue
         
-        # Calculate metrics
+        # Calculate final metrics
         if deviations:
-            roughness_metrics['rms_roughness'] = np.sqrt(np.mean(np.array(deviations)**2))
-            roughness_metrics['mean_deviation'] = np.mean(deviations)
-            roughness_metrics['max_deviation'] = np.max(deviations)
-            roughness_metrics['std_deviation'] = np.std(deviations)
+            deviations_array = np.array(deviations)
+            roughness_metrics['rms_roughness'] = np.sqrt(np.mean(deviations_array**2))
+            roughness_metrics['mean_deviation'] = np.mean(deviations_array)
+            roughness_metrics['max_deviation'] = np.max(deviations_array)
+            roughness_metrics['std_deviation'] = np.std(deviations_array)
         else:
-            roughness_metrics['rms_roughness'] = 0.001  # Small default value
+            # Default values for very smooth surfaces
+            roughness_metrics['rms_roughness'] = 0.0005
             roughness_metrics['mean_deviation'] = 0.0
             roughness_metrics['max_deviation'] = 0.0
             roughness_metrics['std_deviation'] = 0.0
         
         if normal_variations:
-            roughness_metrics['normal_variation'] = np.mean(normal_variations)
-            roughness_metrics['normal_std'] = np.std(normal_variations)
+            normal_variations_array = np.array(normal_variations)
+            roughness_metrics['normal_variation'] = np.mean(normal_variations_array)
+            roughness_metrics['normal_std'] = np.std(normal_variations_array)
         else:
             roughness_metrics['normal_variation'] = 0.0
             roughness_metrics['normal_std'] = 0.0
@@ -250,6 +253,10 @@ class StoneFragmentFaceClassifier:
             roughness_metrics['rms_roughness'] * 0.7 +
             roughness_metrics['normal_variation'] * 0.3
         )
+        
+        # Additional surface quality metrics
+        roughness_metrics['point_count'] = len(face_points)
+        roughness_metrics['surface_area_estimate'] = len(face_points) * (radius**2)  # Rough estimate
         
         return roughness_metrics
     
@@ -279,39 +286,6 @@ class StoneFragmentFaceClassifier:
         
         return face_classifications
     
-    def create_classified_visualization(self, pcd, labels, face_classifications):
-        """Create visualization with faces colored by their classification."""
-        points = np.asarray(pcd.points)
-        point_colors = np.zeros((len(points), 3))
-        
-        # Count surfaces by type (simplified to 2 types)
-        surface_type_counts = {'break': 0, 'carved': 0, 'unclassified': 0}
-        
-        print(f"\nColoring faces by classification...")
-        
-        # Color points based on face classification
-        for face_id, classification in face_classifications.items():
-            face_type = classification['type']
-            color = self.surface_colors[face_type]
-            
-            face_mask = labels == face_id
-            point_colors[face_mask] = color
-            surface_type_counts[face_type] += 1
-            
-            print(f"Face {face_id}: {face_type} - {np.sum(face_mask)} points")
-        
-        # Gray for unassigned points
-        unassigned_mask = labels == -1
-        point_colors[unassigned_mask] = self.surface_colors['unclassified']
-        unassigned_count = np.sum(unassigned_mask)
-        if unassigned_count > 0:
-            print(f"Unassigned: {unassigned_count} points")
-        
-        # Create colored point cloud
-        colored_pcd = o3d.geometry.PointCloud()
-        colored_pcd.points = pcd.points
-        colored_pcd.colors = o3d.utility.Vector3dVector(point_colors)
-        
     def create_classified_visualization(self, pcd, labels, face_classifications):
         """Create visualization with faces colored by their classification."""
         points = np.asarray(pcd.points)
@@ -401,8 +375,102 @@ class StoneFragmentFaceClassifier:
             return "sky blue"
         else:
             return "mixed"
+    
+    def save_results(self, results, output_path, save_format='pkl'):
+        """
+        Save analysis results to file.
         
-        return colored_pcd, surface_type_counts
+        Args:
+            results: Dictionary containing analysis results
+            output_path: Path where to save the results
+            save_format: 'pkl' for pickle or 'json' for JSON format
+        """
+        # Prepare serializable results
+        serializable_results = self._prepare_serializable_results(results)
+        
+        if save_format.lower() == 'pkl':
+            output_file = Path(output_path).with_suffix('.pkl')
+            with open(output_file, 'wb') as f:
+                pickle.dump(serializable_results, f)
+            print(f"Results saved to {output_file}")
+            
+        elif save_format.lower() == 'json':
+            output_file = Path(output_path).with_suffix('.json')
+            with open(output_file, 'w') as f:
+                json.dump(serializable_results, f, indent=2, default=self._json_serializer)
+            print(f"Results saved to {output_file}")
+            
+        else:
+            raise ValueError("save_format must be 'pkl' or 'json'")
+        
+        return output_file
+    
+    def _prepare_serializable_results(self, results):
+        """Prepare results for serialization by converting numpy arrays to lists."""
+        serializable = {}
+        
+        for key, value in results.items():
+            if key == 'pcd':
+                # Save point cloud data as arrays
+                serializable['point_cloud'] = {
+                    'points': np.asarray(value.points).tolist(),
+                    'colors': np.asarray(value.colors).tolist() if value.has_colors() else None,
+                    'normals': np.asarray(value.normals).tolist() if value.has_normals() else None
+                }
+            elif key == 'colored_pcd':
+                # Save colored point cloud data as arrays
+                serializable['colored_point_cloud'] = {
+                    'points': np.asarray(value.points).tolist(),
+                    'colors': np.asarray(value.colors).tolist() if value.has_colors() else None,
+                    'normals': np.asarray(value.normals).tolist() if value.has_normals() else None
+                }
+            elif key == 'labels':
+                serializable['labels'] = value.tolist() if isinstance(value, np.ndarray) else value
+            elif isinstance(value, np.ndarray):
+                serializable[key] = value.tolist()
+            elif key in ['pcd', 'colored_pcd']:  # Skip Open3D objects
+                continue
+            else:
+                serializable[key] = value
+        
+        return serializable
+    
+    def _json_serializer(self, obj):
+        """Custom JSON serializer for numpy objects."""
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+    
+    def load_results(self, file_path):
+        """
+        Load previously saved results.
+        
+        Args:
+            file_path: Path to the saved results file
+            
+        Returns:
+            Dictionary containing the loaded results
+        """
+        file_path = Path(file_path)
+        
+        if file_path.suffix == '.pkl':
+            with open(file_path, 'rb') as f:
+                results = pickle.load(f)
+            print(f"Results loaded from {file_path}")
+            
+        elif file_path.suffix == '.json':
+            with open(file_path, 'r') as f:
+                results = json.load(f)
+            print(f"Results loaded from {file_path}")
+            
+        else:
+            raise ValueError("File must have .pkl or .json extension")
+        
+        return results
     
     def visualize_classified_faces(self, colored_pcd, surface_type_counts):
         """Display the classified faces in Open3D viewer."""
@@ -438,8 +506,18 @@ class StoneFragmentFaceClassifier:
         vis.run()
         vis.destroy_window()
     
-    def process_single_fragment(self, ply_file_path):
-        """Process a single PLY fragment file."""
+    def process_single_fragment(self, ply_file_path, save_results=True, save_format='pkl', 
+                              output_dir=None, show_visualization=True):
+        """
+        Process a single PLY fragment file.
+        
+        Args:
+            ply_file_path: Path to PLY file
+            save_results: Whether to save results to file
+            save_format: 'pkl' or 'json'
+            output_dir: Directory to save results (default: same as input file)
+            show_visualization: Whether to show 3D visualization
+        """
         print(f"Processing fragment: {ply_file_path}")
         print("="*60)
         
@@ -476,204 +554,344 @@ class StoneFragmentFaceClassifier:
             pcd, labels, face_classifications
         )
         
-        # Display in Open3D
-        self.visualize_classified_faces(colored_pcd, surface_counts)
+        # Prepare results
+        results = {
+            'filename': os.path.basename(ply_file_path),
+            'filepath': ply_file_path,
+            'processing_time': time.time() - start_time,
+            'parameters': {
+                'downsample_factor': self.downsample_factor,
+                'roughness_thresholds': self.roughness_thresholds,
+                'normal_radius': normal_radius
+            },
+            'pcd': pcd,
+            'labels': labels,
+            'face_classifications': face_classifications,
+            'surface_counts': surface_counts,
+            'colored_pcd': colored_pcd
+        }
+        
+        # Save results if requested
+        if save_results:
+            if output_dir is None:
+                output_dir = os.path.dirname(ply_file_path)
+            
+            base_name = Path(ply_file_path).stem
+            output_path = os.path.join(output_dir, f"{base_name}_analysis")
+            self.save_results(results, output_path, save_format)
+        
+        # Display visualization if requested
+        if show_visualization:
+            self.visualize_classified_faces(colored_pcd, surface_counts)
         
         processing_time = time.time() - start_time
         print(f"\nProcessing completed in {processing_time:.2f} seconds")
         
-        return {
-            'pcd': pcd,
-            'labels': labels,
-            'face_classifications': face_classifications,
-            'surface_counts': surface_counts
+        return results
+    
+    def process_folder(self, input_folder, output_folder=None, save_format='pkl', 
+                      show_individual_visualizations=False, create_summary=True):
+        """
+        Process all PLY files in a folder.
+        
+        Args:
+            input_folder: Path to folder containing PLY files
+            output_folder: Path to output folder (default: input_folder + '_results')
+            save_format: 'pkl' or 'json'
+            show_individual_visualizations: Whether to show visualization for each file
+            create_summary: Whether to create a summary report
+        """
+        input_path = Path(input_folder)
+        if not input_path.exists():
+            print(f"Error: Input folder {input_folder} not found")
+            return None
+        
+        # Find all PLY files
+        ply_files = list(input_path.glob("*.ply"))
+        if not ply_files:
+            print(f"No PLY files found in {input_folder}")
+            return None
+        
+        print(f"Found {len(ply_files)} PLY files to process")
+        
+        # Set up output directory
+        if output_folder is None:
+            output_folder = f"{input_folder}_results"
+        
+        output_path = Path(output_folder)
+        output_path.mkdir(exist_ok=True)
+        print(f"Results will be saved to: {output_path}")
+        
+        # Process each file
+        all_results = {}
+        batch_summary = {
+            'total_files': len(ply_files),
+            'successful_files': 0,
+            'failed_files': 0,
+            'total_faces': 0,
+            'total_break_faces': 0,
+            'total_carved_faces': 0,
+            'processing_start_time': time.time(),
+            'file_results': {}
         }
+        
+        for i, ply_file in enumerate(ply_files, 1):
+            print(f"\n{'='*80}")
+            print(f"Processing file {i}/{len(ply_files)}: {ply_file.name}")
+            print(f"{'='*80}")
+            
+            try:
+                # Process single fragment
+                result = self.process_single_fragment(
+                    str(ply_file), 
+                    save_results=True,
+                    save_format=save_format,
+                    output_dir=str(output_path),
+                    show_visualization=show_individual_visualizations
+                )
+                
+                if result:
+                    all_results[ply_file.name] = result
+                    batch_summary['successful_files'] += 1
+                    batch_summary['total_faces'] += len(result['face_classifications'])
+                    batch_summary['total_break_faces'] += result['surface_counts']['break']
+                    batch_summary['total_carved_faces'] += result['surface_counts']['carved']
+                    
+                    # Store file summary
+                    batch_summary['file_results'][ply_file.name] = {
+                        'faces_found': len(result['face_classifications']),
+                        'break_faces': result['surface_counts']['break'],
+                        'carved_faces': result['surface_counts']['carved'],
+                        'processing_time': result['processing_time']
+                    }
+                    
+                    print(f"✅ Successfully processed {ply_file.name}")
+                else:
+                    batch_summary['failed_files'] += 1
+                    print(f"❌ Failed to process {ply_file.name}")
+                    
+            except Exception as e:
+                print(f"❌ Error processing {ply_file.name}: {e}")
+                batch_summary['failed_files'] += 1
+        
+        # Complete batch summary
+        batch_summary['processing_end_time'] = time.time()
+        batch_summary['total_processing_time'] = batch_summary['processing_end_time'] - batch_summary['processing_start_time']
+        
+        # Save batch summary
+        if create_summary:
+            summary_file = output_path / f"batch_summary.{save_format}"
+            if save_format == 'pkl':
+                with open(summary_file, 'wb') as f:
+                    pickle.dump(batch_summary, f)
+            else:
+                with open(summary_file, 'w') as f:
+                    json.dump(batch_summary, f, indent=2, default=self._json_serializer)
+            
+            print(f"\nBatch summary saved to: {summary_file}")
+        
+        # Print final summary
+        self._print_batch_summary(batch_summary)
+        
+        return all_results, batch_summary
     
-    def segment_by_normal_clustering(self, pcd, eps=0.15, min_samples=100):
-        """Segment point cloud by clustering surface normals."""
-        print("Segmenting faces by normal clustering...")
+    def _print_batch_summary(self, batch_summary):
+        """Print a formatted batch processing summary."""
+        print(f"\n{'='*80}")
+        print(f"BATCH PROCESSING SUMMARY")
+        print(f"{'='*80}")
+        print(f"Total files processed: {batch_summary['total_files']}")
+        print(f"✅ Successful: {batch_summary['successful_files']}")
+        print(f"❌ Failed: {batch_summary['failed_files']}")
+        print(f"Total processing time: {batch_summary['total_processing_time']:.2f} seconds")
+        print(f"\nAGGREGATE STATISTICS:")
+        print(f"Total faces found: {batch_summary['total_faces']}")
+        print(f"🔵 Total break surfaces: {batch_summary['total_break_faces']}")
+        print(f"🎨 Total carved surfaces: {batch_summary['total_carved_faces']}")
         
-        # Compute normals
-        normal_radius = self.compute_normals(pcd)
-        normals = np.asarray(pcd.normals)
+        if batch_summary['total_faces'] > 0:
+            break_percentage = (batch_summary['total_break_faces'] / batch_summary['total_faces']) * 100
+            carved_percentage = (batch_summary['total_carved_faces'] / batch_summary['total_faces']) * 100
+            print(f"Break surface ratio: {break_percentage:.1f}%")
+            print(f"Carved surface ratio: {carved_percentage:.1f}%")
         
-        # Cluster normals using DBSCAN
-        scaler = StandardScaler()
-        normals_scaled = scaler.fit_transform(normals)
+        print(f"\nPER-FILE BREAKDOWN:")
+        print(f"{'Filename':<30} {'Faces':<6} {'Break':<6} {'Carved':<7} {'Time(s)':<8}")
+        print(f"{'-'*30} {'-'*6} {'-'*6} {'-'*7} {'-'*8}")
         
-        clustering = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
-        labels = clustering.fit_predict(normals_scaled)
+        for filename, file_result in batch_summary['file_results'].items():
+            print(f"{filename:<30} {file_result['faces_found']:<6} "
+                  f"{file_result['break_faces']:<6} {file_result['carved_faces']:<7} "
+                  f"{file_result['processing_time']:<8.2f}")
         
-        n_clusters = len(np.unique(labels[labels >= 0]))
-        print(f"Found {n_clusters} face segments")
-        return labels, normal_radius
+        print(f"{'='*80}")
     
-    def calculate_face_roughness(self, pcd, labels, radius):
-        """Calculate roughness for each segmented face."""
-        points = np.asarray(pcd.points)
-        normals = np.asarray(pcd.normals)
+    def load_and_visualize_results(self, results_file):
+        """
+        Load saved results and visualize them.
         
-        unique_labels = np.unique(labels)
-        valid_labels = unique_labels[unique_labels >= 0]
+        Args:
+            results_file: Path to saved results file (.pkl or .json)
+        """
+        results = self.load_results(results_file)
         
-        face_roughness = {}
-        
-        print("\nCalculating roughness for each face...")
-        
-        for label in valid_labels:
-            face_mask = labels == label
-            face_points = points[face_mask]
-            face_normals = normals[face_mask]
+        # Reconstruct point cloud from saved data
+        if 'colored_point_cloud' in results:
+            pcd_data = results['colored_point_cloud']
+            colored_pcd = o3d.geometry.PointCloud()
+            colored_pcd.points = o3d.utility.Vector3dVector(np.array(pcd_data['points']))
+            if pcd_data['colors']:
+                colored_pcd.colors = o3d.utility.Vector3dVector(np.array(pcd_data['colors']))
+            if pcd_data['normals']:
+                colored_pcd.normals = o3d.utility.Vector3dVector(np.array(pcd_data['normals']))
             
-            if len(face_points) < 10:
-                continue
+            # Show visualization
+            self.visualize_classified_faces(colored_pcd, results['surface_counts'])
+        elif 'point_cloud' in results:
+            # Fallback to original point cloud data
+            pcd_data = results['point_cloud']
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(np.array(pcd_data['points']))
+            if pcd_data['normals']:
+                pcd.normals = o3d.utility.Vector3dVector(np.array(pcd_data['normals']))
             
-            print(f"Analyzing face {label} with {len(face_points)} points...")
-            
-            # Calculate roughness metrics for this face
-            roughness_metrics = self._calculate_roughness_metrics(
-                face_points, face_normals, radius
+            # Recreate visualization from labels and classifications
+            labels = np.array(results['labels'])
+            face_classifications = results['face_classifications']
+            colored_pcd, surface_counts = self.create_classified_visualization(
+                pcd, labels, face_classifications
             )
-            
-            face_roughness[int(label)] = roughness_metrics
-            print(f"  RMS roughness: {roughness_metrics['rms_roughness']:.6f}")
-            print(f"  Normal variation: {roughness_metrics['normal_variation']:.6f}")
-            print(f"  Combined roughness: {roughness_metrics['combined_roughness']:.6f}")
+            self.visualize_classified_faces(colored_pcd, surface_counts)
         
-        return face_roughness
-    
-    def _calculate_roughness_metrics(self, face_points, face_normals, radius):
-        """Calculate various roughness metrics for a face."""
-        # Create KDTree for this specific face
-        face_tree = cKDTree(face_points)
-        
-        roughness_metrics = {}
-        deviations = []
-        normal_variations = []
-        
-        # Sample points for efficiency (max 200 points per face for roughness calculation)
-        n_samples = min(200, len(face_points))
-        sample_indices = np.linspace(0, len(face_points)-1, n_samples, dtype=int)
-        
-        for i in sample_indices:
-            point = face_points[i]
-            
-            # Find neighbors within radius
-            neighbors_idx = face_tree.query_ball_point(point, radius)
-            
-            if len(neighbors_idx) > 3:
-                neighbor_points = face_points[neighbors_idx]
-                
-                # Calculate local plane using PCA
-                centered_points = neighbor_points - np.mean(neighbor_points, axis=0)
-                
-                # Handle case where all points are nearly the same
-                if np.allclose(centered_points, 0, atol=1e-8):
-                    continue
-                
-                try:
-                    # Use SVD for better numerical stability
-                    U, s, Vt = np.linalg.svd(centered_points, full_matrices=False)
-                    
-                    # Check if we have enough variation
-                    if len(s) > 0 and s[0] > 1e-8:
-                        # The last row of Vt is the normal to the best-fit plane
-                        plane_normal = Vt[-1]
-                        
-                        # Calculate distances from points to the plane
-                        distances = np.abs(np.dot(centered_points, plane_normal))
-                        deviations.extend(distances)
-                    
-                except (np.linalg.LinAlgError, ValueError):
-                    continue
-                
-                # Calculate normal variation (angular deviation)
-                if i < len(face_normals):
-                    try:
-                        current_normal = face_normals[i]
-                        
-                        # Get neighbor normals (ensure indices are valid)
-                        valid_neighbor_indices = [idx for idx in neighbors_idx if idx < len(face_normals)]
-                        
-                        if valid_neighbor_indices:
-                            neighbor_normals = face_normals[valid_neighbor_indices]
-                            
-                            for neighbor_normal in neighbor_normals:
-                                # Calculate angle between normals
-                                dot_product = np.clip(np.abs(np.dot(current_normal, neighbor_normal)), 0, 1)
-                                angle = np.arccos(dot_product)
-                                normal_variations.append(angle)
-                    except (IndexError, ValueError):
-                        continue
-        
-        # Calculate final metrics
-        if deviations:
-            deviations_array = np.array(deviations)
-            roughness_metrics['rms_roughness'] = np.sqrt(np.mean(deviations_array**2))
-            roughness_metrics['mean_deviation'] = np.mean(deviations_array)
-            roughness_metrics['max_deviation'] = np.max(deviations_array)
-            roughness_metrics['std_deviation'] = np.std(deviations_array)
-        else:
-            # Default values for very smooth surfaces
-            roughness_metrics['rms_roughness'] = 0.0005
-            roughness_metrics['mean_deviation'] = 0.0
-            roughness_metrics['max_deviation'] = 0.0
-            roughness_metrics['std_deviation'] = 0.0
-        
-        if normal_variations:
-            normal_variations_array = np.array(normal_variations)
-            roughness_metrics['normal_variation'] = np.mean(normal_variations_array)
-            roughness_metrics['normal_std'] = np.std(normal_variations_array)
-        else:
-            roughness_metrics['normal_variation'] = 0.0
-            roughness_metrics['normal_std'] = 0.0
-        
-        # Combined roughness score (weighted combination)
-        roughness_metrics['combined_roughness'] = (
-            roughness_metrics['rms_roughness'] * 0.7 +
-            roughness_metrics['normal_variation'] * 0.3
-        )
-        
-        # Additional surface quality metrics
-        roughness_metrics['point_count'] = len(face_points)
-        roughness_metrics['surface_area_estimate'] = len(face_points) * (radius**2)  # Rough estimate
-        
-        return roughness_metrics
+        return results
+
+
+def find_ply_files(directory):
+    """Find all PLY files in a directory."""
+    ply_files = []
+    for ext in ['*.ply', '*.PLY']:
+        ply_files.extend(glob.glob(os.path.join(directory, ext)))
+    return sorted(ply_files)
+
 
 def main():
-    """Main function to process a single stone fragment."""
-    parser = argparse.ArgumentParser(description='Classify stone fragment faces as carved/original/break')
-    parser.add_argument('ply_file', help='Path to PLY file')
+    """Main function to process stone fragments."""
+    parser = argparse.ArgumentParser(description='Classify stone fragment faces as carved/break')
+    
+    # Input options
+    parser.add_argument('input', nargs='?', help='Path to PLY file or folder containing PLY files')
+    parser.add_argument('--folder', action='store_true', 
+                       help='Process entire folder instead of single file')
+    
+    # Output options
+    parser.add_argument('--output', help='Output directory for results (default: auto-generated)')
+    parser.add_argument('--format', choices=['pkl', 'json'], default='pkl',
+                       help='Output format for saved results (default: pkl)')
+    parser.add_argument('--no-save', action='store_true',
+                       help='Do not save results to file')
+    
+    # Processing options
     parser.add_argument('--downsample', type=float, default=1.0,
                        help='Downsample factor (1.0 = no downsampling, 0.5 = half points)')
-    parser.add_argument('--eps', type=float, default=0.10,
+    parser.add_argument('--eps', type=float, default=0.15,
                        help='DBSCAN eps parameter for face segmentation')
     parser.add_argument('--min_samples', type=int, default=100,
                        help='DBSCAN min_samples parameter for face segmentation')
     
-    args = parser.parse_args()
+    # Visualization options
+    parser.add_argument('--no-viz', action='store_true',
+                       help='Skip visualization (useful for batch processing)')
+    parser.add_argument('--show-individual', action='store_true',
+                       help='Show visualization for each file when processing folder')
     
-    # Check if file exists
-    if not os.path.exists(args.ply_file):
-        print(f"Error: File {args.ply_file} not found")
-        return
+    # Load existing results
+    parser.add_argument('--load', help='Load and visualize existing results file')
+    
+    args = parser.parse_args()
     
     # Initialize classifier
     classifier = StoneFragmentFaceClassifier(downsample_factor=args.downsample)
     
-    # Process the fragment
-    result = classifier.process_single_fragment(args.ply_file)
+    # Handle loading existing results
+    if args.load:
+        if not os.path.exists(args.load):
+            print(f"Error: Results file {args.load} not found")
+            return
+        
+        print(f"Loading results from: {args.load}")
+        classifier.load_and_visualize_results(args.load)
+        return
     
-    if result:
-        print(f"\nAnalysis complete!")
-        print(f"Total faces found: {len(result['face_classifications'])}")
-        print(f"Break surfaces: {result['surface_counts']['break']}")
-        print(f"Carved surfaces: {result['surface_counts']['carved']}")
+    # Check if input is provided when not loading
+    if not args.input:
+        print("Error: Input path is required when not using --load")
+        parser.print_help()
+        return
+    
+    # Check if input exists
+    if not os.path.exists(args.input):
+        print(f"Error: Input {args.input} not found")
+        return
+    
+    # Process folder or single file
+    if args.folder or os.path.isdir(args.input):
+        print(f"Processing folder: {args.input}")
+        
+        # Set up output directory
+        output_dir = args.output
+        if output_dir is None:
+            output_dir = f"{args.input}_results"
+        
+        # Process all files in folder
+        results, summary = classifier.process_folder(
+            input_folder=args.input,
+            output_folder=output_dir,
+            save_format=args.format,
+            show_individual_visualizations=args.show_individual,
+            create_summary=not args.no_save
+        )
+        
+        if results:
+            print(f"\nBatch processing complete!")
+            print(f"Results saved to: {output_dir}")
+    
+    else:
+        print(f"Processing single file: {args.input}")
+        
+        # Process single file
+        result = classifier.process_single_fragment(
+            ply_file_path=args.input,
+            save_results=not args.no_save,
+            save_format=args.format,
+            output_dir=args.output,
+            show_visualization=not args.no_viz
+        )
+        
+        if result:
+            print(f"\nAnalysis complete!")
+            print(f"Total faces found: {len(result['face_classifications'])}")
+            print(f"Break surfaces: {result['surface_counts']['break']}")
+            print(f"Carved surfaces: {result['surface_counts']['carved']}")
+
 
 if __name__ == "__main__":
     main()
 
+
 # Example usage:
+# 
+# Single file processing:
 # python face_classifier.py fragment.ply
-# python face_classifier.py fragment.ply --downsample 0.8 --eps 0.12
-# python face_classifier.py ply_fragments/frag_3_cell_04.ply
+# python face_classifier.py fragment.ply --format json --output ./results
+#
+# Folder processing:
+# python face_classifier.py ./ply_fragments --folder
+# python face_classifier.py ./ply_fragments --folder --format json --no-viz
+# python face_classifier.py ./ply_fragments --folder --show-individual
+#
+# Load and visualize existing results:
+# python face_classifier.py --load fragment_analysis.pkl
+# python face_classifier.py --load ./results/batch_summary.json
+#
+# Advanced options:
+# python face_classifier.py ./fragments --folder --downsample 0.8 --eps 0.12 --output ./analysis_results
