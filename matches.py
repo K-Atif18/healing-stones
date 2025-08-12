@@ -1,4 +1,31 @@
-import numpy as np
+# Example usage:
+#
+# Basic usage - match break surfaces in a results folder:
+# python break_surface_matcher.py ./fragment_results
+#
+# With custom similarity threshold and visualization:
+# python break_surface_matcher.py ./fragment_results --min-similarity 0.7 --visualize
+#
+# Disable normal similarity (focus on shape and size):
+# python break_surface_matcher.py ./fragment_results --no-normal --visualize-count 5
+#
+# Custom weight configuration (more emphasis on shape):
+# python break_surface_matcher.py ./fragment_results --weight-shape 0.6 --weight-size 0.3 --weight-normal 0.1
+#
+# Visualize specific match:
+# python break_surface_matcher.py ./fragment_results --visualize-match 1
+#
+# Fragment overview visualization:
+# python break_surface_matcher.py ./fragment_results --fragment-overview
+#
+# Visualize specific fragments:
+# python break_surface_matcher.py ./fragment_results --visualize-fragments frag_3_cell_01 frag_3_cell_06
+#
+# Complete analysis with visualization:
+# python break_surface_matcher.py ./fragment_results --visualize --visualize-count 5 --show-matches 20
+#
+# Shape-focused matching (no normals):
+# python break_surface_matcher.py ./fragment_results --no-normal --weight-shape 0.7 --weight-size 0.3import numpy as np
 import open3d as o3d
 import pickle
 import json
@@ -17,7 +44,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class BreakSurfaceMatcher:
-    def __init__(self, normal_threshold=0.1, shape_threshold=0.3, size_threshold=0.5):
+    def __init__(self, normal_threshold=0.1, shape_threshold=0.3, size_threshold=0.5,
+                 use_normal_similarity=True, weights=None):
         """
         Initialize break surface matcher.
         
@@ -25,10 +53,38 @@ class BreakSurfaceMatcher:
             normal_threshold: Maximum angle difference for normal similarity (radians)
             shape_threshold: Maximum shape descriptor difference for shape similarity
             size_threshold: Maximum relative size difference for size similarity (0-1)
+            use_normal_similarity: Whether to include normal similarity in matching
+            weights: Dictionary of weights for different similarity components
         """
         self.normal_threshold = normal_threshold
         self.shape_threshold = shape_threshold  
         self.size_threshold = size_threshold
+        self.use_normal_similarity = use_normal_similarity
+        
+        # Default weights - can be customized
+        if weights is None:
+            if use_normal_similarity:
+                self.weights = {
+                    'normal': 0.4,    # Normal alignment
+                    'size': 0.25,     # Size matching  
+                    'shape': 0.25,    # Shape characteristics
+                    'moment': 0.1     # Geometric moments
+                }
+            else:
+                self.weights = {
+                    'normal': 0.0,    # Skip normal similarity
+                    'size': 0.4,      # Increased size weight
+                    'shape': 0.5,     # Increased shape weight
+                    'moment': 0.1     # Geometric moments
+                }
+        else:
+            self.weights = weights
+            
+        # Normalize weights to sum to 1
+        weight_sum = sum(self.weights.values())
+        if weight_sum > 0:
+            for key in self.weights:
+                self.weights[key] /= weight_sum
         
         # Storage for loaded fragments and their break surfaces
         self.fragments = {}
@@ -346,18 +402,11 @@ class BreakSurfaceMatcher:
         similarities['moment_similarity'] = 1.0 / (1.0 + moment_distance)
         
         # 5. Overall similarity (weighted combination)
-        weights = {
-            'normal': 0.4,    # Normal alignment is very important for break surfaces
-            'size': 0.3,      # Size matching is important
-            'shape': 0.2,     # Shape characteristics
-            'moment': 0.1     # Geometric moments
-        }
-        
         similarities['overall_similarity'] = (
-            weights['normal'] * similarities['normal_similarity'] +
-            weights['size'] * similarities['size_similarity'] +
-            weights['shape'] * similarities['shape_similarity'] + 
-            weights['moment'] * similarities['moment_similarity']
+            self.weights['normal'] * similarities['normal_similarity'] +
+            self.weights['size'] * similarities['size_similarity'] +
+            self.weights['shape'] * similarities['shape_similarity'] + 
+            self.weights['moment'] * similarities['moment_similarity']
         )
         
         return similarities
@@ -500,7 +549,7 @@ class BreakSurfaceMatcher:
         print(f"Matches saved to: {output_path}")
         return output_path
     
-    def visualize_match(self, match, save_image=None):
+    def visualize_match(self, match, save_image=None, show_normals=False):
         """Visualize a specific match by showing the two break surfaces."""
         fragment1 = match['fragment1']
         face1 = match['face1']
@@ -520,27 +569,160 @@ class BreakSurfaceMatcher:
         pcd2.points = o3d.utility.Vector3dVector(surface2['points'])
         pcd2.paint_uniform_color([0, 0, 1])  # Blue
         
+        # Add normals if available and requested
+        if show_normals and surface1['normals'] is not None:
+            pcd1.normals = o3d.utility.Vector3dVector(surface1['normals'])
+        if show_normals and surface2['normals'] is not None:
+            pcd2.normals = o3d.utility.Vector3dVector(surface2['normals'])
+        
         # Offset second surface for better visualization
         bbox1 = pcd1.get_axis_aligned_bounding_box()
         bbox2 = pcd2.get_axis_aligned_bounding_box()
         offset = (bbox1.max_bound - bbox1.min_bound)[0] + (bbox2.max_bound - bbox2.min_bound)[0]
         pcd2.translate([offset * 1.5, 0, 0])
         
+        # Create coordinate frames for better visualization
+        coord1 = o3d.geometry.TriangleMesh.create_coordinate_frame(size=50.0, origin=bbox1.get_center())
+        coord2 = o3d.geometry.TriangleMesh.create_coordinate_frame(size=50.0, origin=bbox2.get_center() + np.array([offset * 1.5, 0, 0]))
+        
         print(f"\nVisualizing match between:")
         print(f"  RED: {fragment1} face {face1}")
         print(f"  BLUE: {fragment2} face {face2}")
         print(f"  Overall similarity: {match['similarities']['overall_similarity']:.3f}")
+        print(f"  Normal similarity: {match['similarities']['normal_similarity']:.3f}")
+        print(f"  Shape similarity: {match['similarities']['shape_similarity']:.3f}")
+        print(f"  Size similarity: {match['similarities']['size_similarity']:.3f}")
         
         # Visualize
         vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=f"Break Surface Match", width=1200, height=800)
+        vis.create_window(window_name=f"Break Surface Match - Similarity: {match['similarities']['overall_similarity']:.3f}", 
+                         width=1400, height=900)
         vis.add_geometry(pcd1)
         vis.add_geometry(pcd2)
+        vis.add_geometry(coord1)
+        vis.add_geometry(coord2)
         
         # Set viewing options
         render_option = vis.get_render_option()
-        render_option.background_color = np.array([0.1, 0.1, 0.1])
+        render_option.background_color = np.array([0.05, 0.05, 0.05])
         render_option.point_size = 3.0
+        
+        # Get view control and set a good viewing angle
+        view_control = vis.get_view_control()
+        view_control.set_zoom(0.7)
+        
+        vis.run()
+        vis.destroy_window()
+    
+    def visualize_multiple_matches(self, matches, num_matches=5, save_images=False, output_dir=None):
+        """Visualize multiple matches in sequence."""
+        if not matches:
+            print("No matches to visualize.")
+            return
+            
+        num_matches = min(num_matches, len(matches))
+        print(f"\nVisualizing top {num_matches} matches...")
+        
+        for i in range(num_matches):
+            match = matches[i]
+            print(f"\n{'='*60}")
+            print(f"Match {i+1}/{num_matches}")
+            print(f"{'='*60}")
+            
+            if save_images and output_dir:
+                image_path = Path(output_dir) / f"match_{i+1:02d}.png"
+                self.visualize_match(match, save_image=str(image_path))
+            else:
+                self.visualize_match(match)
+                
+            if i < num_matches - 1:
+                input("Press Enter to view next match (or Ctrl+C to stop)...")
+    
+    def visualize_fragment_overview(self, fragment_names=None, max_fragments=4):
+        """Visualize multiple fragments with their break surfaces highlighted."""
+        if fragment_names is None:
+            fragment_names = list(self.fragments.keys())[:max_fragments]
+        elif isinstance(fragment_names, str):
+            fragment_names = [fragment_names]
+            
+        fragment_names = fragment_names[:max_fragments]
+        
+        print(f"Visualizing {len(fragment_names)} fragments with break surfaces...")
+        
+        # Colors for different fragments
+        colors = np.array([
+            [1.0, 0.0, 0.0],    # Red
+            [0.0, 0.0, 1.0],    # Blue  
+            [0.0, 0.8, 0.0],    # Green
+            [1.0, 0.5, 0.0],    # Orange
+            [0.8, 0.0, 0.8],    # Magenta
+            [0.0, 0.8, 0.8],    # Cyan
+        ])
+        
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(window_name="Fragment Overview - Break Surfaces", width=1600, height=1000)
+        
+        for i, fragment_name in enumerate(fragment_names):
+            if fragment_name not in self.fragments:
+                continue
+                
+            # Get original point cloud
+            results = self.fragments[fragment_name]
+            if 'point_cloud' in results:
+                points = np.array(results['point_cloud']['points'])
+            else:
+                continue
+                
+            labels = np.array(results['labels'])
+            face_classifications = results['face_classifications']
+            
+            # Create point cloud
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            
+            # Color all points gray initially
+            point_colors = np.full((len(points), 3), 0.3)  # Dark gray
+            
+            # Color break surfaces with fragment-specific color
+            fragment_color = colors[i % len(colors)]
+            
+            for face_id, classification in face_classifications.items():
+                if classification['type'] == 'break':
+                    face_id = int(face_id)
+                    face_mask = labels == face_id
+                    point_colors[face_mask] = fragment_color
+            
+            pcd.colors = o3d.utility.Vector3dVector(point_colors)
+            
+            # Offset fragments for better visualization
+            if i > 0:
+                bbox = pcd.get_axis_aligned_bounding_box()
+                bbox_size = bbox.max_bound - bbox.min_bound
+                offset = np.array([bbox_size[0] * 1.2 * i, 0, 0])
+                pcd.translate(offset)
+            
+            vis.add_geometry(pcd)
+            
+            # Add text label (approximated with coordinate frame)
+            if i == 0:
+                bbox_center = pcd.get_axis_aligned_bounding_box().get_center()
+                coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=30.0, origin=bbox_center)
+                vis.add_geometry(coord)
+        
+        # Set viewing options
+        render_option = vis.get_render_option()
+        render_option.background_color = np.array([0.05, 0.05, 0.05])
+        render_option.point_size = 2.0
+        
+        view_control = vis.get_view_control()
+        view_control.set_zoom(0.6)
+        
+        print("Fragment colors:")
+        for i, name in enumerate(fragment_names):
+            color_name = ['Red', 'Blue', 'Green', 'Orange', 'Magenta', 'Cyan'][i % 6]
+            print(f"  {name}: {color_name}")
+        print("\nGray: Non-break surfaces")
+        print("Colored: Break surfaces")
         
         vis.run()
         vis.destroy_window()
@@ -597,7 +779,8 @@ class BreakSurfaceMatcher:
     
     def process_results_folder(self, results_folder, output_folder=None, 
                               min_similarity=0.6, save_format='json', 
-                              show_top_matches=10, create_plots=True):
+                              show_top_matches=10, create_plots=True,
+                              visualize_matches=False, num_visualize=3):
         """
         Complete processing pipeline for a folder of fragment analysis results.
         
@@ -608,10 +791,14 @@ class BreakSurfaceMatcher:
             save_format: 'json' or 'pkl'
             show_top_matches: Number of top matches to display
             create_plots: Whether to create summary plots
+            visualize_matches: Whether to show 3D visualizations of top matches
+            num_visualize: Number of top matches to visualize
         """
         print("="*80)
         print("BREAK SURFACE MATCHING PIPELINE")
         print("="*80)
+        print(f"Similarity weights: Normal={self.weights['normal']:.2f}, Size={self.weights['size']:.2f}, Shape={self.weights['shape']:.2f}, Moment={self.weights['moment']:.2f}")
+        print(f"Using normal similarity: {self.use_normal_similarity}")
         
         # Load all fragment results
         if not self.load_all_fragments(results_folder):
@@ -654,6 +841,13 @@ class BreakSurfaceMatcher:
             plot_file = output_path / "match_summary.png"
             self.create_match_summary_plot(matches, plot_file)
         
+        # Visualize matches if requested
+        if visualize_matches and matches:
+            print(f"\n{'='*60}")
+            print("3D VISUALIZATION OF TOP MATCHES")
+            print(f"{'='*60}")
+            self.visualize_multiple_matches(matches, num_matches=min(num_visualize, len(matches)))
+        
         print(f"\nProcessing complete!")
         print(f"Results saved to: {output_path}")
         
@@ -678,17 +872,37 @@ def main():
     parser.add_argument('--size-threshold', type=float, default=0.5, 
                        help='Size similarity threshold (default: 0.5)')
     
+    # Similarity weighting options
+    parser.add_argument('--no-normal', action='store_true',
+                       help='Disable normal similarity (focus on shape and size only)')
+    parser.add_argument('--weight-normal', type=float, default=None,
+                       help='Weight for normal similarity (default: 0.4 if enabled, 0.0 if disabled)')
+    parser.add_argument('--weight-size', type=float, default=None,
+                       help='Weight for size similarity (default: auto-calculated)')
+    parser.add_argument('--weight-shape', type=float, default=None,
+                       help='Weight for shape similarity (default: auto-calculated)')
+    parser.add_argument('--weight-moment', type=float, default=None,
+                       help='Weight for geometric moments (default: 0.1)')
+    
     # Output options
-    parser.add_argument('--format', choices=['json', 'pkl'], default='pkl',
+    parser.add_argument('--format', choices=['json', 'pkl'], default='json',
                        help='Output format for results (default: json)')
     parser.add_argument('--show-matches', type=int, default=10,
                        help='Number of top matches to display (default: 10)')
     parser.add_argument('--no-plots', action='store_true',
                        help='Skip creating summary plots')
     
-    # Visualization
+    # Visualization options
+    parser.add_argument('--visualize', action='store_true',
+                       help='Show 3D visualizations of top matches')
+    parser.add_argument('--visualize-count', type=int, default=3,
+                       help='Number of top matches to visualize (default: 3)')
     parser.add_argument('--visualize-match', type=int,
                        help='Visualize specific match by index (1-based)')
+    parser.add_argument('--visualize-fragments', nargs='*',
+                       help='Visualize specific fragments with break surfaces')
+    parser.add_argument('--fragment-overview', action='store_true',
+                       help='Show overview of all fragments with break surfaces')
     
     args = parser.parse_args()
     
@@ -697,12 +911,42 @@ def main():
         print(f"Error: Results folder {args.results_folder} not found")
         return
     
+    # Set up custom weights if provided
+    custom_weights = None
+    use_normal = not args.no_normal
+    
+    if any([args.weight_normal is not None, args.weight_size is not None, 
+            args.weight_shape is not None, args.weight_moment is not None]):
+        custom_weights = {}
+        if args.weight_normal is not None:
+            custom_weights['normal'] = args.weight_normal
+            use_normal = args.weight_normal > 0
+        if args.weight_size is not None:
+            custom_weights['size'] = args.weight_size
+        if args.weight_shape is not None:
+            custom_weights['shape'] = args.weight_shape
+        if args.weight_moment is not None:
+            custom_weights['moment'] = args.weight_moment
+    
     # Initialize matcher
     matcher = BreakSurfaceMatcher(
         normal_threshold=args.normal_threshold,
         shape_threshold=args.shape_threshold,
-        size_threshold=args.size_threshold
+        size_threshold=args.size_threshold,
+        use_normal_similarity=use_normal,
+        weights=custom_weights
     )
+    
+    # Handle fragment overview visualization
+    if args.fragment_overview:
+        print("Loading fragments for overview...")
+        if matcher.load_all_fragments(args.results_folder):
+            matcher.extract_break_surfaces()
+            if args.visualize_fragments:
+                matcher.visualize_fragment_overview(args.visualize_fragments)
+            else:
+                matcher.visualize_fragment_overview()
+        return
     
     # Process the results folder
     matches = matcher.process_results_folder(
@@ -711,16 +955,28 @@ def main():
         min_similarity=args.min_similarity,
         save_format=args.format,
         show_top_matches=args.show_matches,
-        create_plots=not args.no_plots
+        create_plots=not args.no_plots,
+        visualize_matches=args.visualize,
+        num_visualize=args.visualize_count
     )
     
-    # Visualize specific match if requested
+    # Handle specific match visualization
     if args.visualize_match and matches:
         if 1 <= args.visualize_match <= len(matches):
             match_to_show = matches[args.visualize_match - 1]
+            print(f"\n{'='*60}")
+            print(f"VISUALIZING SPECIFIC MATCH #{args.visualize_match}")
+            print(f"{'='*60}")
             matcher.visualize_match(match_to_show)
         else:
             print(f"Invalid match index. Available matches: 1-{len(matches)}")
+    
+    # Handle fragment-specific visualization
+    if args.visualize_fragments and matches:
+        print(f"\n{'='*60}")
+        print(f"VISUALIZING SPECIFIC FRAGMENTS")
+        print(f"{'='*60}")
+        matcher.visualize_fragment_overview(args.visualize_fragments)
 
 
 if __name__ == "__main__":
@@ -740,7 +996,7 @@ if __name__ == "__main__":
 #
 # Custom output location:
 # python break_surface_matcher.py ./fragment_results --output ./surface_matches
-#data stored in
+#
 # Visualize the best match:
 # python break_surface_matcher.py ./fragment_results --visualize-match 1
 #
