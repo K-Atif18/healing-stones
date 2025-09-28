@@ -1,0 +1,65 @@
+{
+  "color_extraction": {
+    "method": "direct_mesh_thresholds",
+    "color_tolerance": 0.0,
+    "min_cluster_size": 1,
+    "use_direct_detection": true,
+    "blue_range": {
+      "min": [
+        0,
+        0,
+        153
+      ],
+      "max": [
+        102,
+        102,
+        255
+      ]
+    },
+    "green_range": {
+      "min": [
+        0,
+        153,
+        0
+      ],
+      "max": [
+        102,
+        255,
+        102
+      ]
+    },
+    "red_range": {
+      "min": [
+        153,
+        0,
+        0
+      ],
+      "max": [
+        255,
+        102,
+        102
+      ]
+    }
+  },
+  "matching": {
+    "min_similarity": 0.9,
+    "use_optimal_matching": true,
+    "similarity_weights": {
+      "normal_similarity": 0.5,
+      "area_similarity": 0.3,
+      "shape_similarity": 0.1,
+      "curvature_similarity": 0.05,
+      "boundary_similarity": 0.03,
+      "size_similarity": 0.02
+    }
+  },
+  "alignment": {
+    "icp_max_iterations": 50,
+    "icp_threshold": 0.03,
+    "optimization_method": "BFGS"
+  },
+  "visualization": {
+    "show_step_by_step": true,
+    "save_images": true
+  }
+}
