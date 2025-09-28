@@ -12,7 +12,7 @@ This project implements a complete **geometric-based reconstruction pipeline** a
 
 ### Experimental Machine Learning Approaches (links below)
 
-1.      **Machine Learning Approach** (Incomplete - Future Work)
+1. **Machine Learning Approach** (Incomplete - Future Work)
     - Initial deep learning models for fragment relationship prediction
     - Graph neural network architectures for assembly planning
     - Abandoned due to dataset limitations and overfitting issues
