@@ -6,7 +6,7 @@
 
 The goal of this project is to digitally reconstruct a fragmented **Mayan stele** using advanced 3D computer vision and deep learning techniques. The central topic is automatic artifact reassembly, where broken stone fragments are scanned as 3D point clouds and then analyzed to detect break surfaces, extract geometric features, and identify possible matches. To tackle this challenge, I preprocess the fragments with multi-scale downsampling and clustering, represent them as graphs of potential connections, and train a graph neural network and Siamese-based models to predict which fragments belong together. These predictions are refined with alignment algorithms like Iterative Closest Point (ICP), while ground truth reconstructions provide assembly knowledge to guide the model. Ultimately, the system aims to move from scattered fragments to a coherent, near-complete digital reconstruction of the stele, reducing manual effort while preserving archaeological heritage.
 
-## What I Built
+## What I Built (use the config I created)
 
 This project implements a complete **geometric-based reconstruction pipeline** as the foundation for future deep learning integration. The system consists of several interconnected modules:
 
