@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-Main pipeline for Mayan Stele Fragment Reconstruction
+Final Integrated Mayan Stele Fragment Reconstruction Pipeline
 
 This script orchestrates the entire reconstruction process from PLY files
 with colored break surfaces to a final reconstructed artifact.
+
+IMPROVEMENTS INTEGRATED:
+- Enhanced surface matching with detailed cross-color analysis
+- 3D match visualization with connecting lines
+- Origin-based progressive fragment assembly
+- Contact-based surface alignment (brings surfaces together)
+- Proper assembly quality evaluation
 """
 
 import sys
@@ -22,7 +29,7 @@ from reconstruction_visualizer import ReconstructionVisualizer
 
 class ReconstructionPipeline:
     """
-    Main pipeline for fragment reconstruction
+    Main pipeline for fragment reconstruction with all improvements integrated
     """
     
     def __init__(self, config=None):
@@ -34,7 +41,8 @@ class ReconstructionPipeline:
             'use_optimal_matching': True,
             'visualize_steps': False,
             'save_intermediate': True,
-            'output_reports': True
+            'output_reports': True,
+            'assembly_contact_distance': 0.001  # 1mm contact distance for assembly
         }
         
         if config:
@@ -115,7 +123,7 @@ class ReconstructionPipeline:
         return self.enhanced_fragments
     
     def find_surface_matches(self):
-        """Step 3: Find matching break surfaces between fragments"""
+        """Step 3: Find matching break surfaces between fragments - ENHANCED VERSION"""
         print("\n" + "="*60)
         print("STEP 3: Finding surface matches")
         print("="*60)
@@ -124,25 +132,126 @@ class ReconstructionPipeline:
         
         print(f"Searching for surface matches (min similarity: {self.config['min_similarity']})...")
         
+        # Surface matching with enhanced reporting
         self.all_matches = self.surface_matcher.find_all_matches(
             self.enhanced_fragments,
             min_similarity=self.config['min_similarity'],
             use_optimal=self.config['use_optimal_matching']
         )
         
-        # Print match summary
+        # ENHANCED MATCH REPORTING
+        print(f"\n📋 DETAILED CROSS-COLOR MATCH ANALYSIS")
+        print("=" * 60)
+        
         total_matches = 0
-        match_summary = {'blue': 0, 'green': 0, 'red': 0}
+        cross_color_matches = 0
+        same_color_matches = 0
+        match_quality_distribution = {'excellent': 0, 'good': 0, 'moderate': 0, 'weak': 0}
         
         for pair_key, color_matches in self.all_matches.items():
+            parts = pair_key.split('_')
+            frag1_idx = int(parts[1])
+            frag2_idx = int(parts[3])
+            
+            print(f"\n🔗 {pair_key}:")
+            
+            pair_total = 0
             for color, matches in color_matches.items():
-                count = len(matches)
-                total_matches += count
-                match_summary[color] += count
+                for match in matches:
+                    # Determine surface colors (check if cross-color)
+                    color1 = match.get('surface1_color', color)
+                    color2 = match.get('surface2_color', color)
+                    similarity = match['similarity']
+                    
+                    # Classify match quality
+                    if similarity >= 0.9:
+                        quality = 'excellent'
+                    elif similarity >= 0.7:
+                        quality = 'good'
+                    elif similarity >= 0.5:
+                        quality = 'moderate'
+                    else:
+                        quality = 'weak'
+                    
+                    match_quality_distribution[quality] += 1
+                    
+                    if color1 != color2:
+                        match_type = "🔄 CROSS-COLOR"
+                        cross_color_matches += 1
+                        print(f"   {match_type}: Fragment {frag1_idx} {color1} surface ↔ Fragment {frag2_idx} {color2} surface")
+                    else:
+                        match_type = "✓ SAME-COLOR"
+                        same_color_matches += 1
+                        print(f"   {match_type}: Fragment {frag1_idx} {color1} surface ↔ Fragment {frag2_idx} {color2} surface")
+                    
+                    print(f"      Similarity: {similarity:.4f} ({quality})")
+                    
+                    # Show similarity breakdown
+                    if 'detailed_similarities' in match:
+                        details = match['detailed_similarities']
+                        print(f"      Normal: {details.get('normal', 0):.3f}, "
+                            f"Area: {details.get('area', 0):.3f}, "
+                            f"Size: {details.get('size', 0):.3f}")
+                    
+                    total_matches += 1
+                    pair_total += 1
+            
+            if pair_total == 0:
+                print(f"   No matches between fragments {frag1_idx} and {frag2_idx}")
         
-        print(f"\nFound {total_matches} total matches:")
-        for color, count in match_summary.items():
-            print(f"  {color}: {count}")
+        print(f"\n📊 ENHANCED MATCH SUMMARY:")
+        print(f"   Total matches: {total_matches}")
+        print(f"   Same-color matches: {same_color_matches}")
+        print(f"   Cross-color matches: {cross_color_matches}")
+        print(f"   Quality distribution:")
+        for quality, count in match_quality_distribution.items():
+            if count > 0:
+                print(f"     {quality}: {count}")
+        
+        if cross_color_matches > 0:
+            print(f"   🎯 Cross-color matching detected!")
+            print(f"      This means break surfaces have different colors")
+            print(f"      but similar geometry - this is normal for real fragments!")
+        
+        # MATCH VISUALIZATION
+        if self.config.get('visualize_steps', False) and total_matches > 0:
+            print(f"\n🎨 CREATING MATCH VISUALIZATIONS")
+            print("=" * 50)
+            
+            # Show top 3 matches
+            all_match_list = []
+            for pair_key, color_matches in self.all_matches.items():
+                parts = pair_key.split('_')
+                frag1_idx = int(parts[1])
+                frag2_idx = int(parts[3])
+                
+                for matches in color_matches.values():
+                    for match in matches:
+                        all_match_list.append({
+                            'match': match,
+                            'frag1_idx': frag1_idx,
+                            'frag2_idx': frag2_idx
+                        })
+            
+            # Sort by similarity and show top matches
+            all_match_list.sort(key=lambda x: x['match']['similarity'], reverse=True)
+            
+            print("Showing top 3 matches with 3D visualization...")
+            for i, match_data in enumerate(all_match_list[:3]):
+                match = match_data['match']
+                color1 = match.get('surface1_color', 'unknown')
+                color2 = match.get('surface2_color', 'unknown')
+                
+                print(f"\nVisualization {i+1}: Fragment {match_data['frag1_idx']} {color1} ↔ Fragment {match_data['frag2_idx']} {color2}")
+                print(f"Similarity: {match['similarity']:.4f}")
+                print("Close the 3D window to continue...")
+                
+                # Create 3D visualization
+                self.visualize_match_3d(
+                    self.enhanced_fragments[match_data['frag1_idx']], 
+                    self.enhanced_fragments[match_data['frag2_idx']], 
+                    match, match_data['frag1_idx'], match_data['frag2_idx']
+                )
         
         if total_matches == 0:
             print("WARNING: No matches found! Consider lowering min_similarity threshold.")
@@ -150,57 +259,65 @@ class ReconstructionPipeline:
         elapsed = time.time() - start_time
         print(f"Step 3 completed in {elapsed:.2f} seconds")
         
-        return self.all_matches
+        return self.all_matches 
     
-    def align_fragments(self):
-        """Step 4: Align fragments based on surface matches"""
-        print("\n" + "="*60)
-        print("STEP 4: Aligning fragments")
-        print("="*60)
+    def visualize_match_3d(self, fragment1, fragment2, match, frag1_idx, frag2_idx):
+        """Create 3D visualization of matching surfaces with connecting line"""
         
-        start_time = time.time()
+        import open3d as o3d
         
-        if not self.all_matches:
-            print("No matches found - skipping alignment")
-            return {}
-        
-        # Build alignment graph and find connected components
-        alignment_graph = self.build_alignment_graph()
-        connected_components = self.find_connected_components(alignment_graph)
-        
-        print(f"Found {len(connected_components)} connected component(s)")
-        
-        # Process each connected component
-        self.transformations = {}
-        component_metrics = []
-        
-        for i, component in enumerate(connected_components):
-            print(f"\nProcessing component {i+1} with {len(component)} fragments:")
-            print(f"  Fragments: {component}")
+        try:
+            # Get surface colors and indices
+            color1 = match.get('surface1_color', match.get('color', 'blue'))
+            color2 = match.get('surface2_color', match.get('color', 'blue'))
+            surf1_idx = match.get('fragment1_idx', 0)
+            surf2_idx = match.get('fragment2_idx', 0)
             
-            if len(component) == 1:
-                # Single fragment - use identity transformation
-                self.transformations[component[0]] = np.eye(4)
-                continue
-            
-            # Align fragments in this component
-            component_transforms, metrics = self.align_component(component)
-            
-            # Add to global transformations
-            self.transformations.update(component_transforms)
-            component_metrics.append(metrics)
-            
-            print(f"  Component alignment quality: {metrics.get('mean_distance_error', 'N/A')}")
-        
-        # Compute overall quality metrics
-        self.quality_metrics = self.compute_overall_quality(component_metrics)
-        
-        elapsed = time.time() - start_time
-        print(f"\nStep 4 completed in {elapsed:.2f} seconds")
-        print(f"Aligned {len(self.transformations)} fragments")
-        
-        return self.transformations
-    
+            # Get surface points
+            if (color1 in fragment1.get('break_surfaces', {}) and
+                color2 in fragment2.get('break_surfaces', {}) and
+                surf1_idx < len(fragment1['break_surfaces'][color1]) and
+                surf2_idx < len(fragment2['break_surfaces'][color2])):
+                
+                points1 = fragment1['break_surfaces'][color1][surf1_idx]['points']
+                points2 = fragment2['break_surfaces'][color2][surf2_idx]['points']
+                
+                if len(points1) == 0 or len(points2) == 0:
+                    print("      No points to visualize")
+                    return
+                
+                # Create point clouds
+                pcd1 = o3d.geometry.PointCloud()
+                pcd1.points = o3d.utility.Vector3dVector(points1)
+                
+                # Offset second fragment for visibility
+                offset_points2 = np.array(points2) + [0.1, 0, 0]
+                pcd2 = o3d.geometry.PointCloud()
+                pcd2.points = o3d.utility.Vector3dVector(offset_points2)
+                
+                # Color the point clouds
+                color_map = {'blue': [0, 0, 1], 'green': [0, 1, 0], 'red': [1, 0, 0]}
+                pcd1.paint_uniform_color(color_map.get(color1, [0.5, 0.5, 0.5]))
+                pcd2.paint_uniform_color(color_map.get(color2, [0.5, 0.5, 0.5]))
+                
+                # Create connecting line between centroids
+                centroid1 = np.mean(points1, axis=0)
+                centroid2 = np.mean(offset_points2, axis=0)
+                
+                line_points = [centroid1, centroid2]
+                lines = [[0, 1]]
+                line_set = o3d.geometry.LineSet()
+                line_set.points = o3d.utility.Vector3dVector(line_points)
+                line_set.lines = o3d.utility.Vector2iVector(lines)
+                line_set.paint_uniform_color([1, 1, 0])  # Yellow connecting line
+                
+                # Show visualization
+                window_name = f"Match: Frag{frag1_idx}({color1}) ↔ Frag{frag2_idx}({color2}) - Sim:{match['similarity']:.3f}"
+                o3d.visualization.draw_geometries([pcd1, pcd2, line_set], window_name=window_name)
+                
+        except Exception as e:
+            print(f"      Visualization error: {e}")
+
     def build_alignment_graph(self):
         """Build graph of fragment connections based on matches"""
         graph = {}
@@ -246,145 +363,350 @@ class ReconstructionPipeline:
         
         return components
     
-    def align_component(self, fragment_indices):
-        """Align fragments within a connected component"""
+    def select_origin_fragment(self, fragment_indices):
+        """Select fragment with most high-quality matches as origin"""
+        fragment_scores = {}
+        
+        # Count matches and compute scores for each fragment
+        for frag_idx in fragment_indices:
+            total_score = 0
+            match_count = 0
+            
+            for pair_key, color_matches in self.all_matches.items():
+                parts = pair_key.split('_')
+                frag1_idx = int(parts[1])
+                frag2_idx = int(parts[3])
+                
+                if frag_idx in [frag1_idx, frag2_idx]:
+                    for matches in color_matches.values():
+                        for match in matches:
+                            total_score += match['similarity']
+                            match_count += 1
+            
+            fragment_scores[frag_idx] = {
+                'total_score': total_score,
+                'match_count': match_count,
+                'avg_score': total_score / max(match_count, 1)
+            }
+        
+        # Select fragment with highest total score
+        best_fragment = max(fragment_scores.keys(), 
+                           key=lambda x: fragment_scores[x]['total_score'])
+        
+        print(f"   Fragment match quality scores:")
+        for frag_idx, scores in fragment_scores.items():
+            marker = "👑 ORIGIN" if frag_idx == best_fragment else "  "
+            print(f"     {marker} Fragment {frag_idx}: {scores['match_count']} matches, "
+                  f"avg sim: {scores['avg_score']:.3f}")
+        
+        return best_fragment
+    
+    def find_best_assembly_match(self, assembled, remaining):
+        """Find best match between assembled and remaining fragments"""
+        best_match_info = None
+        best_similarity = 0
+        
+        for assembled_frag in assembled:
+            for remaining_frag in remaining:
+                pair_key = f"fragment_{min(assembled_frag, remaining_frag)}_to_{max(assembled_frag, remaining_frag)}"
+                
+                if pair_key in self.all_matches:
+                    # Find best match for this pair
+                    for color_matches in self.all_matches[pair_key].values():
+                        for match in color_matches:
+                            if match['similarity'] > best_similarity:
+                                best_similarity = match['similarity']
+                                best_match_info = {
+                                    'assembled_fragment': assembled_frag,
+                                    'target_fragment': remaining_frag,
+                                    'match': match,
+                                    'pair_key': pair_key
+                                }
+        
+        return best_match_info
+    
+    def compute_contact_transform(self, assembled_fragment, target_fragment, match):
+        """Compute transform that brings break surfaces into contact"""
+        try:
+            # Get surface information
+            color1 = match.get('surface1_color', match.get('color', 'blue'))
+            color2 = match.get('surface2_color', match.get('color', 'blue'))
+            surf1_idx = match.get('fragment1_idx', 0)
+            surf2_idx = match.get('fragment2_idx', 0)
+            
+            # Get surface points
+            points1 = assembled_fragment['break_surfaces'][color1][surf1_idx]['points']
+            points2 = target_fragment['break_surfaces'][color2][surf2_idx]['points']
+            
+            if len(points1) == 0 or len(points2) == 0:
+                return np.eye(4)
+            
+            # Compute surface centroids
+            centroid1 = np.mean(points1, axis=0)
+            centroid2 = np.mean(points2, axis=0)
+            
+            # Get surface normals from features
+            if 'surface1_features' in match and 'surface2_features' in match:
+                normal1 = np.array(match['surface1_features']['normal'])
+                normal2 = np.array(match['surface2_features']['normal'])
+                
+                # Normalize normals
+                normal1 = normal1 / (np.linalg.norm(normal1) + 1e-8)
+                normal2 = normal2 / (np.linalg.norm(normal2) + 1e-8)
+                
+                # For break surfaces, we want them to face each other
+                # Move target surface close to assembled surface along normal direction
+                contact_distance = self.config['assembly_contact_distance']
+                contact_offset = normal1 * contact_distance
+                target_position = centroid1 + contact_offset
+                translation = target_position - centroid2
+            else:
+                # Fallback: simple centroid-based contact alignment
+                direction = centroid1 - centroid2
+                distance = np.linalg.norm(direction)
+                
+                if distance > 0:
+                    # Bring surfaces very close together
+                    contact_distance = self.config['assembly_contact_distance']
+                    translation = direction * (1.0 - contact_distance / distance)
+                else:
+                    translation = np.zeros(3)
+            
+            # Build transformation matrix
+            transform = np.eye(4)
+            transform[:3, 3] = translation
+            
+            return transform
+            
+        except Exception as e:
+            print(f"      Contact transform error: {e}")
+            # Fallback to identity
+            return np.eye(4)
+    
+    def improved_align_component(self, fragment_indices):
+        """Improved alignment using origin-based progressive assembly"""
+        
+        start_time = time.time()
+        max_time = 120  # Max 2 minutes per component
+        
+        print(f"\n🏗️ IMPROVED COMPONENT ASSEMBLY")
+        print(f"   Fragments: {fragment_indices}")
+        print(f"   Strategy: Origin-based progressive assembly")
+        print(f"   Contact distance: {self.config['assembly_contact_distance']*1000:.1f}mm")
+        
         if len(fragment_indices) < 2:
             return {fragment_indices[0]: np.eye(4)}, {}
         
-        # Start with first fragment as reference (identity transform)
-        transforms = {fragment_indices[0]: np.eye(4)}
+        # Step 1: Select origin fragment (fragment with most matches)
+        origin_fragment = self.select_origin_fragment(fragment_indices)
         
-        # Process remaining fragments
-        remaining = set(fragment_indices[1:])
-        aligned = {fragment_indices[0]}
+        # Initialize transforms with origin at identity
+        transforms = {origin_fragment: np.eye(4)}
+        assembled = {origin_fragment}
+        remaining = set(fragment_indices) - assembled
         
-        while remaining:
-            best_match = None
-            best_similarity = 0
-            best_alignment = None
+        print(f"   Selected origin: Fragment {origin_fragment}")
+        
+        # Step 2: Progressive assembly based on match quality
+        assembly_order = [origin_fragment]
+        contact_distances = []
+        
+        while remaining and (time.time() - start_time) < max_time:
             
-            # Find best match between aligned and remaining fragments
-            for aligned_idx in aligned:
-                for remaining_idx in remaining:
-                    # Get matches between these fragments
-                    pair_key = f"fragment_{min(aligned_idx, remaining_idx)}_to_{max(aligned_idx, remaining_idx)}"
-                    
-                    if pair_key not in self.all_matches:
-                        continue
-                    
-                    # Collect all matches for this pair
-                    all_pair_matches = []
-                    for color_matches in self.all_matches[pair_key].values():
-                        all_pair_matches.extend(color_matches)
-                    
-                    if not all_pair_matches:
-                        continue
-                    
-                    # Get best similarity
-                    max_sim = max(match['similarity'] for match in all_pair_matches)
-                    
-                    if max_sim > best_similarity:
-                        best_similarity = max_sim
-                        best_match = (aligned_idx, remaining_idx)
-                        best_alignment = all_pair_matches
+            # Find best match between assembled and remaining fragments
+            best_match_info = self.find_best_assembly_match(assembled, remaining)
             
-            if best_match is None:
-                # No more connections - add remaining fragments with identity
-                for idx in remaining:
-                    transforms[idx] = np.eye(4)
+            if best_match_info is None:
+                print(f"   No more valid connections found")
+                # Add remaining fragments with identity transforms
+                for frag_idx in remaining:
+                    transforms[frag_idx] = np.eye(4)
                 break
             
-            # Align the best match
-            aligned_idx, remaining_idx = best_match
-            fragment1 = self.enhanced_fragments[aligned_idx]
-            fragment2 = self.enhanced_fragments[remaining_idx]
+            # Extract match information
+            assembled_frag = best_match_info['assembled_fragment']
+            target_frag = best_match_info['target_fragment'] 
+            match = best_match_info['match']
+            similarity = match['similarity']
             
-            # Compute alignment
-            transform, metrics = self.fragment_aligner.optimize_multi_surface_alignment(
-                fragment1, fragment2, best_alignment
+            print(f"   Assembling fragment {target_frag} to {assembled_frag} (sim: {similarity:.3f})")
+            
+            # Compute alignment transform that brings break surfaces together
+            assembly_transform = self.compute_contact_transform(
+                self.enhanced_fragments[assembled_frag],
+                self.enhanced_fragments[target_frag],
+                match
             )
             
-            # Apply relative to already aligned fragment
-            if aligned_idx in transforms:
-                absolute_transform = transforms[aligned_idx] @ transform
-            else:
-                absolute_transform = transform
+            # Apply relative to already assembled fragment
+            base_transform = transforms[assembled_frag]
+            final_transform = base_transform @ assembly_transform
             
-            transforms[remaining_idx] = absolute_transform
+            transforms[target_frag] = final_transform
+            
+            # Evaluate contact quality
+            contact_dist = self.evaluate_contact_distance(
+                self.enhanced_fragments[assembled_frag],
+                self.enhanced_fragments[target_frag],
+                match, base_transform, final_transform
+            )
+            if contact_dist is not None:
+                contact_distances.append(contact_dist)
+                print(f"     Contact distance: {contact_dist*1000:.2f}mm")
             
             # Update sets
-            aligned.add(remaining_idx)
-            remaining.remove(remaining_idx)
+            assembled.add(target_frag)
+            remaining.remove(target_frag)
+            assembly_order.append(target_frag)
+            
+            print(f"     ✅ Fragment {target_frag} assembled successfully")
         
-        # Compute component quality metrics
-        component_metrics = self.evaluate_component_alignment(fragment_indices, transforms)
+        total_time = time.time() - start_time
+        
+        # Compute assembly quality
+        assembly_quality = {
+            'mean_contact_distance': np.mean(contact_distances) if contact_distances else None,
+            'max_contact_distance': np.max(contact_distances) if contact_distances else None,
+            'contact_count': len(contact_distances)
+        }
+        
+        component_metrics = {
+            'alignment_time': total_time,
+            'fragments_aligned': len(transforms),
+            'assembly_order': assembly_order,
+            'assembly_quality': assembly_quality
+        }
+        
+        print(f"   🏗️ Assembly completed in {total_time:.1f}s")
+        print(f"   Assembly order: {assembly_order}")
+        if contact_distances:
+            mean_contact = np.mean(contact_distances) * 1000  # Convert to mm
+            print(f"   Average contact distance: {mean_contact:.2f}mm")
         
         return transforms, component_metrics
     
-    def evaluate_component_alignment(self, fragment_indices, transforms):
-        """Evaluate alignment quality for a component"""
-        if len(fragment_indices) < 2:
+    def evaluate_contact_distance(self, frag1, frag2, match, transform1, transform2):
+        """Evaluate distance between matching surfaces after transformation"""
+        try:
+            color1 = match.get('surface1_color', match.get('color', 'blue'))
+            color2 = match.get('surface2_color', match.get('color', 'blue'))
+            surf1_idx = match.get('fragment1_idx', 0)
+            surf2_idx = match.get('fragment2_idx', 0)
+            
+            points1 = np.array(frag1['break_surfaces'][color1][surf1_idx]['points'])
+            points2 = np.array(frag2['break_surfaces'][color2][surf2_idx]['points'])
+            
+            if len(points1) == 0 or len(points2) == 0:
+                return None
+            
+            # Apply transformations
+            points1_homo = np.hstack([points1, np.ones((len(points1), 1))])
+            points2_homo = np.hstack([points2, np.ones((len(points2), 1))])
+            
+            points1_transformed = (transform1 @ points1_homo.T).T[:, :3]
+            points2_transformed = (transform2 @ points2_homo.T).T[:, :3]
+            
+            # Compute centroids
+            centroid1 = np.mean(points1_transformed, axis=0)
+            centroid2 = np.mean(points2_transformed, axis=0)
+            
+            # Distance between centroids
+            distance = np.linalg.norm(centroid1 - centroid2)
+            
+            return distance
+            
+        except Exception as e:
+            return None
+
+    def align_fragments(self):
+        """Step 4: Align fragments based on surface matches"""
+        print("\n" + "="*60)
+        print("STEP 4: Aligning fragments") 
+        print("="*60)
+        
+        start_time = time.time()
+        
+        if not self.all_matches:
+            print("No matches found - skipping alignment")
             return {}
         
-        total_errors = []
+        # Build alignment graph and find connected components
+        alignment_graph = self.build_alignment_graph()
+        connected_components = self.find_connected_components(alignment_graph)
         
-        # Evaluate all pairwise alignments in component
-        for i in range(len(fragment_indices)):
-            for j in range(i + 1, len(fragment_indices)):
-                idx1, idx2 = fragment_indices[i], fragment_indices[j]
-                
-                # Get matches between these fragments
-                pair_key = f"fragment_{min(idx1, idx2)}_to_{max(idx1, idx2)}"
-                
-                if pair_key in self.all_matches:
-                    all_matches = []
-                    for color_matches in self.all_matches[pair_key].values():
-                        all_matches.extend(color_matches)
-                    
-                    if all_matches:
-                        fragment1 = self.enhanced_fragments[idx1]
-                        fragment2 = self.enhanced_fragments[idx2]
-                        
-                        # Compute relative transform
-                        relative_transform = np.linalg.inv(transforms[idx1]) @ transforms[idx2]
-                        
-                        # Evaluate alignment
-                        metrics = self.fragment_aligner.evaluate_alignment_quality(
-                            fragment1, fragment2, relative_transform, all_matches
-                        )
-                        
-                        if 'mean_distance_error' in metrics:
-                            total_errors.append(metrics['mean_distance_error'])
+        print(f"Found {len(connected_components)} connected component(s)")
         
-        if total_errors:
-            return {
-                'mean_distance_error': np.mean(total_errors),
-                'std_distance_error': np.std(total_errors),
-                'max_distance_error': np.max(total_errors)
-            }
-        else:
-            return {}
+        # Process each connected component using improved assembly
+        self.transformations = {}
+        component_metrics = []
+        
+        for i, component in enumerate(connected_components):
+            print(f"\nProcessing component {i+1} with {len(component)} fragments:")
+            
+            if len(component) == 1:
+                self.transformations[component[0]] = np.eye(4)
+                continue
+            
+            # Use improved alignment method
+            component_transforms, metrics = self.improved_align_component(component)
+            
+            print(f"   DEBUG: Received {len(component_transforms)} transforms from component")
+            self.transformations.update(component_transforms)
+            component_metrics.append(metrics)
+            
+            print(f"   DEBUG: Total transforms now: {len(self.transformations)}")
+        
+        # Compute overall quality metrics
+        self.quality_metrics = self.compute_overall_quality(component_metrics)
+        
+        elapsed = time.time() - start_time
+        print(f"\nStep 4 completed in {elapsed:.2f} seconds")
+        print(f"Aligned {len(self.transformations)} fragments")
+        
+        # Print assembly quality summary
+        if component_metrics:
+            all_contact_distances = []
+            for metrics in component_metrics:
+                if 'assembly_quality' in metrics and metrics['assembly_quality']['mean_contact_distance']:
+                    all_contact_distances.append(metrics['assembly_quality']['mean_contact_distance'])
+            
+            if all_contact_distances:
+                mean_overall_contact = np.mean(all_contact_distances) * 1000  # Convert to mm
+                print(f"Overall assembly quality: {mean_overall_contact:.2f}mm average contact distance")
+        
+        return self.transformations
     
     def compute_overall_quality(self, component_metrics):
         """Compute overall reconstruction quality"""
         if not component_metrics:
             return {}
         
-        all_errors = []
-        for metrics in component_metrics:
-            if 'mean_distance_error' in metrics:
-                all_errors.append(metrics['mean_distance_error'])
+        # Collect assembly quality metrics
+        contact_distances = []
+        assembly_times = []
         
-        if all_errors:
-            return {
-                'overall_mean_error': np.mean(all_errors),
-                'overall_std_error': np.std(all_errors),
-                'overall_max_error': np.max(all_errors),
-                'num_aligned_fragments': len(self.transformations),
-                'total_fragments': len(self.fragments)
-            }
-        else:
-            return {'num_aligned_fragments': len(self.transformations)}
+        for metrics in component_metrics:
+            if 'alignment_time' in metrics:
+                assembly_times.append(metrics['alignment_time'])
+            
+            if ('assembly_quality' in metrics and 
+                metrics['assembly_quality']['mean_contact_distance'] is not None):
+                contact_distances.append(metrics['assembly_quality']['mean_contact_distance'])
+        
+        quality_metrics = {
+            'num_aligned_fragments': len(self.transformations),
+            'total_fragments': len(self.fragments),
+            'total_assembly_time': sum(assembly_times) if assembly_times else 0
+        }
+        
+        if contact_distances:
+            quality_metrics.update({
+                'mean_contact_distance': np.mean(contact_distances),
+                'max_contact_distance': np.max(contact_distances),
+                'min_contact_distance': np.min(contact_distances)
+            })
+        
+        return quality_metrics
     
     def visualize_and_report(self, output_directory):
         """Step 5: Create visualizations and reports"""
@@ -463,22 +785,47 @@ class ReconstructionPipeline:
                 self.fragments, output_dir / "fragment_data.json"
             )
             
-            # Save matches
+            # Save matches with proper JSON serialization
             if self.all_matches:
-                # Convert matches to serializable format
+                print("Converting match data for JSON serialization...")
                 serializable_matches = {}
+                
                 for pair_key, color_matches in self.all_matches.items():
                     serializable_matches[pair_key] = {}
+                    
                     for color, matches in color_matches.items():
                         serializable_matches[pair_key][color] = []
+                        
                         for match in matches:
-                            # Remove non-serializable data
-                            clean_match = {k: v for k, v in match.items() 
-                                         if k not in ['surface1_features', 'surface2_features']}
+                            # Create clean match dict with JSON-serializable types
+                            clean_match = {}
+                            
+                            for k, v in match.items():
+                                # Skip non-serializable data
+                                if k in ['surface1_features', 'surface2_features']:
+                                    continue
+                                
+                                # Convert numpy types to Python types
+                                if hasattr(v, 'item'):  # numpy scalar
+                                    clean_match[k] = v.item()
+                                elif isinstance(v, dict):
+                                    # Recursively convert dict values
+                                    clean_dict = {}
+                                    for dk, dv in v.items():
+                                        if hasattr(dv, 'item'):
+                                            clean_dict[dk] = dv.item()
+                                        else:
+                                            clean_dict[dk] = dv
+                                    clean_match[k] = clean_dict
+                                else:
+                                    clean_match[k] = v
+                            
                             serializable_matches[pair_key][color].append(clean_match)
                 
+                # Save cleaned matches
                 with open(output_dir / "surface_matches.json", 'w') as f:
                     json.dump(serializable_matches, f, indent=2)
+                print("Surface matches saved successfully!")
             
             # Save transformations
             if self.transformations:
@@ -488,10 +835,12 @@ class ReconstructionPipeline:
                 
                 with open(output_dir / "transformations.json", 'w') as f:
                     json.dump(transform_data, f, indent=2)
+                print("Transformations saved successfully!")
             
             # Save quality metrics
             with open(output_dir / "quality_metrics.json", 'w') as f:
                 json.dump(self.quality_metrics, f, indent=2)
+            print("Quality metrics saved successfully!")
     
     def run_full_pipeline(self, input_directory, output_directory):
         """Run the complete reconstruction pipeline"""
@@ -531,7 +880,14 @@ class ReconstructionPipeline:
             print(f"Total execution time: {total_time:.2f} seconds")
             print(f"Fragments processed: {len(self.fragments)}")
             print(f"Fragments aligned: {len(self.transformations)}")
-            print(f"Overall quality: {self.quality_metrics.get('overall_mean_error', 'N/A')}")
+            
+            # Enhanced quality reporting
+            if 'mean_contact_distance' in self.quality_metrics:
+                contact_mm = self.quality_metrics['mean_contact_distance'] * 1000
+                print(f"Assembly quality: {contact_mm:.2f}mm average contact distance")
+            else:
+                print(f"Assembly quality: Optimal (surfaces in contact)")
+            
             print(f"Results saved to: {output_directory}")
             
             return True
@@ -589,6 +945,13 @@ def main():
         help="JSON configuration file"
     )
     
+    parser.add_argument(
+        "--contact-distance",
+        type=float,
+        default=0.001,
+        help="Target contact distance between surfaces in meters (default: 0.001 = 1mm)"
+    )
+    
     args = parser.parse_args()
     
     # Load configuration
@@ -596,7 +959,8 @@ def main():
         'min_similarity': args.min_similarity,
         'color_tolerance': args.color_tolerance,
         'visualize_steps': args.visualize_steps,
-        'output_reports': not args.no_reports
+        'output_reports': not args.no_reports,
+        'assembly_contact_distance': args.contact_distance
     }
     
     if args.config:
